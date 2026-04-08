@@ -1,6 +1,10 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/jeetraj/amnesia/medical"
+)
 
 type Blockchain struct {
 	Blocks []Block `json:"blocks"`
@@ -12,9 +16,9 @@ func NewBlockchain() *Blockchain {
 	}
 }
 
-func (bc *Blockchain) AddBlock(data string) Block {
+func (bc *Blockchain) AddBlock(record medical.MedicalRecord) Block {
 	prev := bc.Blocks[len(bc.Blocks)-1]
-	block := NewBlock(prev.Index+1, data, prev.Hash)
+	block := NewBlock(prev.Index+1, record, prev.Hash)
 	bc.Blocks = append(bc.Blocks, block)
 	return block
 }

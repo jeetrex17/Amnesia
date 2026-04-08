@@ -6,28 +6,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/jeetraj/amnesia/medical"
 )
 
 type Block struct {
-	Index     int    `json:"index"`
-	Timestamp int64  `json:"timestamp"`
-	Data      string `json:"data"`
-	PrevHash  string `json:"prev_hash"`
-	Hash      string `json:"hash"`
+	Index     int                   `json:"index"`
+	Timestamp int64                 `json:"timestamp"`
+	Record    medical.MedicalRecord `json:"record"`
+	PrevHash  string                `json:"prev_hash"`
+	Hash      string                `json:"hash"`
 }
 
 type blockHashPayload struct {
-	Index     int    `json:"index"`
-	Timestamp int64  `json:"timestamp"`
-	Data      string `json:"data"`
-	PrevHash  string `json:"prev_hash"`
+	Index     int                   `json:"index"`
+	Timestamp int64                 `json:"timestamp"`
+	Record    medical.MedicalRecord `json:"record"`
+	PrevHash  string                `json:"prev_hash"`
 }
 
-func NewBlock(index int, data string, prevHash string) Block {
+func NewBlock(index int, record medical.MedicalRecord, prevHash string) Block {
 	block := Block{
 		Index:     index,
 		Timestamp: time.Now().Unix(),
-		Data:      data,
+		Record:    record,
 		PrevHash:  prevHash,
 	}
 	block.Hash = block.CalculateHash()
@@ -35,14 +37,14 @@ func NewBlock(index int, data string, prevHash string) Block {
 }
 
 func NewGenesisBlock() Block {
-	return NewBlock(0, "Genesis Block", "")
+	return NewBlock(0, medical.NewGenesisRecord(), "")
 }
 
 func (b Block) CalculateHash() string {
 	payload := blockHashPayload{
 		Index:     b.Index,
 		Timestamp: b.Timestamp,
-		Data:      b.Data,
+		Record:    b.Record,
 		PrevHash:  b.PrevHash,
 	}
 
