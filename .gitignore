@@ -43,6 +43,11 @@ zk-artifacts/
 keystore/
 keys/
 
+# Local generated JSON state
+chain.json
+actors.json
+keystore.json
+
 # Generated zk / crypto artifacts
 *.r1cs
 *.wtns
