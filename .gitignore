@@ -1,0 +1,54 @@
+# OS / file browser noise
+.DS_Store
+Thumbs.db
+
+# Editor / IDE noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+
+# Environment / machine-local config
+.env
+.env.*
+!.env.example
+*.local
+
+# Go build, test, and coverage artifacts
+bin/
+build/
+dist/
+out/
+*.test
+*.prof
+*.pprof
+coverage.out
+coverage.txt
+cover.out
+*.coverprofile
+go.work.sum
+
+# Logs
+*.log
+
+# Local app state and demo data
+data/
+state/
+demo-data/
+tmp/
+artifacts/
+zk-artifacts/
+keystore/
+keys/
+
+# Generated zk / crypto artifacts
+*.r1cs
+*.wtns
+*.proof
+*.pk
+*.vk
+*.srs
+*.key
+*.pem
