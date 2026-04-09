@@ -60,7 +60,6 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("add-record", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	recordID := fs.String("record-id", "", "record identifier")
 	patientID := fs.String("patient", "", "patient identifier")
 	doctorID := fs.String("doctor", "", "doctor identifier")
 	recordType := fs.String("type", "", "record type")
@@ -71,7 +70,7 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	if *recordID == "" || *patientID == "" || *doctorID == "" || *recordType == "" || *title == "" || *content == "" {
+	if *patientID == "" || *doctorID == "" || *recordType == "" || *title == "" || *content == "" {
 		return fmt.Errorf("all add-record flags are required")
 	}
 
@@ -80,14 +79,17 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	record := medical.NewRecord(*recordID, *patientID, *doctorID, *recordType, *title, *content)
-	block := chain.AddBlock(record)
+	record := medical.NewRecord(*patientID, *doctorID, *recordType, *title, *content)
+	block, err := chain.AddBlock(record)
+	if err != nil {
+		return err
+	}
 
 	if err := storage.SaveChain(chainPath, chain); err != nil {
 		return err
 	}
 
-	_, err = fmt.Fprintf(stdout, "added record %s in block %d\n", record.RecordID, block.Index)
+	_, err = fmt.Fprintf(stdout, "added record %s in block %d\n", block.Record.RecordID, block.Index)
 	return err
 }
 
@@ -137,7 +139,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
-	fmt.Fprintln(w, "  add-record --record-id <id> --patient <id> --doctor <id> --type <type> --title <title> --content <content>")
+	fmt.Fprintln(w, "  add-record --patient <id> --doctor <id> --type <type> --title <title> --content <content>")
 	fmt.Fprintln(w, "  view-chain")
 	fmt.Fprintln(w, "  verify")
 }

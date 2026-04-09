@@ -12,7 +12,9 @@ import (
 
 func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 	chain := core.NewBlockchain()
-	chain.AddBlock(medical.NewRecord("R001", "P001", "D001", "visit_note", "Visit Note", "Original content"))
+	if _, err := chain.AddBlock(medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")); err != nil {
+		t.Fatalf("add block failed: %v", err)
+	}
 
 	path := filepath.Join(t.TempDir(), "chain.json")
 	if err := SaveChain(path, chain); err != nil {
@@ -35,7 +37,9 @@ func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 
 func TestLoadChainRejectsTamperedFile(t *testing.T) {
 	chain := core.NewBlockchain()
-	chain.AddBlock(medical.NewRecord("R001", "P001", "D001", "visit_note", "Visit Note", "Original content"))
+	if _, err := chain.AddBlock(medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")); err != nil {
+		t.Fatalf("add block failed: %v", err)
+	}
 
 	path := filepath.Join(t.TempDir(), "chain.json")
 	if err := SaveChain(path, chain); err != nil {
