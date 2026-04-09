@@ -57,3 +57,5 @@ keystore.json
 *.srs
 *.key
 *.pem
+
+*.md
