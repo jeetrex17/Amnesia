@@ -173,11 +173,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
-<<<<<<< HEAD
 	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors into actors.json.")
-=======
-	fmt.Fprintln(w, "      Create a fresh blockchain and save it to chain.json.")
->>>>>>> 2b32f2f353c311711198c177b821009ff95971c4
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  add-record --patient <id> --doctor <id> --type <type> --title <title> --content <content>")
 	fmt.Fprintln(w, "      Add a new medical record to the blockchain.")
@@ -200,7 +196,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "ID format rules:")
 	fmt.Fprintln(w, "  Patient IDs: P001, P002, ...")
 	fmt.Fprintln(w, "  Doctor IDs : D001, D002, ...")
-<<<<<<< HEAD
 	fmt.Fprintln(w, "  Authority IDs: A001, A002, ...")
 	fmt.Fprintln(w, "  Record IDs : generated automatically")
 	fmt.Fprintln(w)
@@ -209,10 +204,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  Doctors    : D001, D002")
 	fmt.Fprintln(w, "  Authorities: A001")
 	fmt.Fprintln(w)
-=======
-	fmt.Fprintln(w, "  Record IDs : generated automatically")
-	fmt.Fprintln(w)
->>>>>>> 2b32f2f353c311711198c177b821009ff95971c4
 	fmt.Fprintln(w, "Example:")
 	fmt.Fprintln(w, `  amnesia add-record --patient P007 --doctor D001 --type diagnosis --title "blood cancer" --content "3 months left"`)
 }
