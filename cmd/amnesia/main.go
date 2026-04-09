@@ -67,17 +67,43 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("add-record", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	patientID := fs.String("patient", "", "patient identifier")
-	doctorID := fs.String("doctor", "", "doctor identifier")
-	recordType := fs.String("type", "", "record type")
-	title := fs.String("title", "", "record title")
-	content := fs.String("content", "", "record content")
+	patientIDLong := fs.String("patient", "", "patient identifier")
+	patientIDShort := fs.String("p", "", "patient identifier")
+	doctorIDLong := fs.String("doctor", "", "doctor identifier")
+	doctorIDShort := fs.String("d", "", "doctor identifier")
+	recordTypeLong := fs.String("type", "", "record type")
+	recordTypeShort := fs.String("r", "", "record type")
+	titleLong := fs.String("title", "", "record title")
+	titleShort := fs.String("t", "", "record title")
+	contentLong := fs.String("content", "", "record content")
+	contentShort := fs.String("c", "", "record content")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	if *patientID == "" || *doctorID == "" || *recordType == "" || *title == "" || *content == "" {
+	patientID, err := resolveFlagValue("patient", *patientIDLong, "p", *patientIDShort)
+	if err != nil {
+		return err
+	}
+	doctorID, err := resolveFlagValue("doctor", *doctorIDLong, "d", *doctorIDShort)
+	if err != nil {
+		return err
+	}
+	recordType, err := resolveFlagValue("type", *recordTypeLong, "r", *recordTypeShort)
+	if err != nil {
+		return err
+	}
+	title, err := resolveFlagValue("title", *titleLong, "t", *titleShort)
+	if err != nil {
+		return err
+	}
+	content, err := resolveFlagValue("content", *contentLong, "c", *contentShort)
+	if err != nil {
+		return err
+	}
+
+	if patientID == "" || doctorID == "" || recordType == "" || title == "" || content == "" {
 		return fmt.Errorf("all add-record flags are required")
 	}
 
@@ -90,14 +116,14 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	if !registry.HasPatient(*patientID) {
-		return fmt.Errorf("unknown patient ID: %s", *patientID)
+	if !registry.HasPatient(patientID) {
+		return fmt.Errorf("unknown patient ID: %s", patientID)
 	}
-	if !registry.HasDoctor(*doctorID) {
-		return fmt.Errorf("unknown doctor ID: %s", *doctorID)
+	if !registry.HasDoctor(doctorID) {
+		return fmt.Errorf("unknown doctor ID: %s", doctorID)
 	}
 
-	record := medical.NewRecord(*patientID, *doctorID, *recordType, *title, *content)
+	record := medical.NewRecord(patientID, doctorID, recordType, title, content)
 	block, err := chain.AddBlock(record)
 	if err != nil {
 		return err
@@ -164,6 +190,17 @@ func loadActorRegistry() (*actors.Registry, error) {
 	return registry, nil
 }
 
+func resolveFlagValue(longName, longValue, shortName, shortValue string) (string, error) {
+	if longValue != "" && shortValue != "" && longValue != shortValue {
+		return "", fmt.Errorf("conflicting values for --%s and -%s", longName, shortName)
+	}
+	if longValue != "" {
+		return longValue, nil
+	}
+
+	return shortValue, nil
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Amnesia")
 	fmt.Fprintln(w, "A redactable zero-knowledge blockchain for medical records.")
@@ -175,9 +212,10 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  init")
 	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors into actors.json.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "  add-record --patient <id> --doctor <id> --type <type> --title <title> --content <content>")
+	fmt.Fprintln(w, "  add-record [--patient|-p] <id> [--doctor|-d] <id> [--type|-r] <type> [--title|-t] <title> [--content|-c] <content>")
 	fmt.Fprintln(w, "      Add a new medical record to the blockchain.")
 	fmt.Fprintln(w, "      Record IDs are generated automatically as R001, R002, ...")
+	fmt.Fprintln(w, "      Short aliases: -p patient, -d doctor, -r type, -t title, -c content")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  view-chain")
 	fmt.Fprintln(w, "      Print the full blockchain as formatted JSON.")
@@ -205,5 +243,5 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  Authorities: A001")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Example:")
-	fmt.Fprintln(w, `  amnesia add-record --patient P007 --doctor D001 --type diagnosis --title "blood cancer" --content "3 months left"`)
+	fmt.Fprintln(w, `  amnesia add-record -p P007 -d D001 -r diagnosis -t "blood cancer" -c "3 months left"`)
 }
