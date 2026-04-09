@@ -9,12 +9,14 @@ import (
 	"log"
 	"os"
 
+	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/core"
 	"github.com/jeetraj/amnesia/medical"
 	"github.com/jeetraj/amnesia/storage"
 )
 
 const chainPath = "chain.json"
+const actorsPath = "actors.json"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -48,11 +50,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func runInit(stdout io.Writer) error {
 	chain := core.NewBlockchain()
+	registry := actors.NewDemoRegistry()
+
 	if err := storage.SaveChain(chainPath, chain); err != nil {
 		return err
 	}
+	if err := storage.SaveActors(actorsPath, registry); err != nil {
+		return err
+	}
 
-	_, err := fmt.Fprintf(stdout, "initialized blockchain at %s\n", chainPath)
+	_, err := fmt.Fprintf(stdout, "initialized blockchain at %s and actors at %s\n", chainPath, actorsPath)
 	return err
 }
 
@@ -77,6 +84,17 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	chain, err := loadExistingChain()
 	if err != nil {
 		return err
+	}
+	registry, err := loadActorRegistry()
+	if err != nil {
+		return err
+	}
+
+	if !registry.HasPatient(*patientID) {
+		return fmt.Errorf("unknown patient ID: %s", *patientID)
+	}
+	if !registry.HasDoctor(*doctorID) {
+		return fmt.Errorf("unknown doctor ID: %s", *doctorID)
 	}
 
 	record := medical.NewRecord(*patientID, *doctorID, *recordType, *title, *content)
@@ -134,6 +152,18 @@ func loadExistingChain() (*core.Blockchain, error) {
 	return chain, nil
 }
 
+func loadActorRegistry() (*actors.Registry, error) {
+	registry, err := storage.LoadActors(actorsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%s not found; run `amnesia init` first", actorsPath)
+		}
+		return nil, err
+	}
+
+	return registry, nil
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Amnesia")
 	fmt.Fprintln(w, "A redactable zero-knowledge blockchain for medical records.")
@@ -143,7 +173,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
-	fmt.Fprintln(w, "      Create a fresh blockchain and save it to chain.json.")
+	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors into actors.json.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  add-record --patient <id> --doctor <id> --type <type> --title <title> --content <content>")
 	fmt.Fprintln(w, "      Add a new medical record to the blockchain.")
@@ -166,7 +196,13 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "ID format rules:")
 	fmt.Fprintln(w, "  Patient IDs: P001, P002, ...")
 	fmt.Fprintln(w, "  Doctor IDs : D001, D002, ...")
+	fmt.Fprintln(w, "  Authority IDs: A001, A002, ...")
 	fmt.Fprintln(w, "  Record IDs : generated automatically")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Seeded demo actors after init:")
+	fmt.Fprintln(w, "  Patients   : P001, P002, P007")
+	fmt.Fprintln(w, "  Doctors    : D001, D002")
+	fmt.Fprintln(w, "  Authorities: A001")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Example:")
 	fmt.Fprintln(w, `  amnesia add-record --patient P007 --doctor D001 --type diagnosis --title "blood cancer" --content "3 months left"`)
