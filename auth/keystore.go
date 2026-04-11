@@ -10,17 +10,12 @@ import (
 	"github.com/jeetraj/amnesia/medical"
 )
 
-const (
-	RolePatient   = "patient"
-	RoleDoctor    = "doctor"
-	RoleAuthority = "authority"
-)
-
 type Entry struct {
 	ActorID    string `json:"actor_id"`
 	Role       string `json:"role"`
 	PublicKey  string `json:"public_key"`
 	PrivateKey string `json:"private_key"`
+	Active     bool   `json:"active"`
 }
 
 type Keystore struct {
@@ -35,7 +30,7 @@ func NewDemoKeystore(registry *actors.Registry) (*Keystore, error) {
 	store := &Keystore{}
 
 	for _, patient := range registry.Patients {
-		entry, err := generateEntry(patient.ID, RolePatient)
+		entry, err := generateEntry(patient.ID, actors.RolePatient)
 		if err != nil {
 			return nil, err
 		}
@@ -43,7 +38,7 @@ func NewDemoKeystore(registry *actors.Registry) (*Keystore, error) {
 	}
 
 	for _, doctor := range registry.Doctors {
-		entry, err := generateEntry(doctor.ID, RoleDoctor)
+		entry, err := generateEntry(doctor.ID, actors.RoleDoctor)
 		if err != nil {
 			return nil, err
 		}
@@ -51,7 +46,7 @@ func NewDemoKeystore(registry *actors.Registry) (*Keystore, error) {
 	}
 
 	for _, authority := range registry.Authorities {
-		entry, err := generateEntry(authority.ID, RoleAuthority)
+		entry, err := generateEntry(authority.ID, actors.RoleAuthority)
 		if err != nil {
 			return nil, err
 		}
@@ -76,6 +71,7 @@ func generateEntry(actorID, role string) (Entry, error) {
 		Role:       role,
 		PublicKey:  base64.StdEncoding.EncodeToString(publicKey),
 		PrivateKey: base64.StdEncoding.EncodeToString(privateKey),
+		Active:     true,
 	}, nil
 }
 
@@ -89,7 +85,7 @@ func (k *Keystore) Validate() error {
 		if entry.ActorID == "" {
 			return fmt.Errorf("actor ID is required")
 		}
-		if entry.Role != RolePatient && entry.Role != RoleDoctor && entry.Role != RoleAuthority {
+		if err := actors.ValidateRole(entry.Role); err != nil {
 			return fmt.Errorf("unsupported role for %s: %s", entry.ActorID, entry.Role)
 		}
 		if _, exists := seen[entry.ActorID]; exists {
@@ -115,6 +111,26 @@ func (k *Keystore) Validate() error {
 	return nil
 }
 
+func (k *Keystore) ActivateLegacyDefaults() {
+	if len(k.Entries) == 0 {
+		return
+	}
+
+	allInactive := true
+	for _, entry := range k.Entries {
+		if entry.Active {
+			allInactive = false
+			break
+		}
+	}
+	if !allInactive {
+		return
+	}
+	for i := range k.Entries {
+		k.Entries[i].Active = true
+	}
+}
+
 func (k *Keystore) EntryForActor(actorID string) (Entry, error) {
 	for _, entry := range k.Entries {
 		if entry.ActorID == actorID {
@@ -123,6 +139,53 @@ func (k *Keystore) EntryForActor(actorID string) (Entry, error) {
 	}
 
 	return Entry{}, fmt.Errorf("keystore entry not found for actor ID: %s", actorID)
+}
+
+func (k *Keystore) EntryForActiveActor(actorID string) (Entry, error) {
+	entry, err := k.EntryForActor(actorID)
+	if err != nil {
+		return Entry{}, err
+	}
+	if !entry.Active {
+		return Entry{}, fmt.Errorf("actor is inactive: %s", actorID)
+	}
+
+	return entry, nil
+}
+
+func (k *Keystore) AddActor(actorID, role string) (Entry, error) {
+	if _, err := k.EntryForActor(actorID); err == nil {
+		return Entry{}, fmt.Errorf("keystore entry already exists for actor ID: %s", actorID)
+	}
+	if err := actors.ValidateRole(role); err != nil {
+		return Entry{}, err
+	}
+
+	entry, err := generateEntry(actorID, role)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	k.Entries = append(k.Entries, entry)
+	if err := k.Validate(); err != nil {
+		return Entry{}, err
+	}
+
+	return entry, nil
+}
+
+func (k *Keystore) DeactivateActor(actorID string) error {
+	for i := range k.Entries {
+		if k.Entries[i].ActorID == actorID {
+			if !k.Entries[i].Active {
+				return fmt.Errorf("keystore entry already inactive for actor ID: %s", actorID)
+			}
+			k.Entries[i].Active = false
+			return nil
+		}
+	}
+
+	return fmt.Errorf("keystore entry not found for actor ID: %s", actorID)
 }
 
 func (e Entry) PublicKeyBytes() (ed25519.PublicKey, error) {
@@ -150,11 +213,11 @@ func (e Entry) PrivateKeyBytes() (ed25519.PrivateKey, error) {
 }
 
 func (k *Keystore) SignRecordAsDoctor(doctorID string, record medical.MedicalRecord) (string, error) {
-	entry, err := k.EntryForActor(doctorID)
+	entry, err := k.EntryForActiveActor(doctorID)
 	if err != nil {
 		return "", err
 	}
-	if entry.Role != RoleDoctor {
+	if entry.Role != actors.RoleDoctor {
 		return "", fmt.Errorf("actor %s is not a doctor", doctorID)
 	}
 
@@ -176,7 +239,7 @@ func (k *Keystore) VerifyDoctorRecordSignature(record medical.MedicalRecord, sig
 	if err != nil {
 		return err
 	}
-	if entry.Role != RoleDoctor {
+	if entry.Role != actors.RoleDoctor {
 		return fmt.Errorf("actor %s is not a doctor", record.DoctorID)
 	}
 

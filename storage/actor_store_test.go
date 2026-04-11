@@ -31,6 +31,9 @@ func TestSaveAndLoadActorsRoundTrip(t *testing.T) {
 	if !loaded.HasAuthority("A001") {
 		t.Fatalf("expected seeded authority to exist")
 	}
+	if !loaded.HasActiveDoctor("D001") {
+		t.Fatalf("expected seeded doctor to be active")
+	}
 }
 
 func TestLoadActorsRejectsTamperedFile(t *testing.T) {

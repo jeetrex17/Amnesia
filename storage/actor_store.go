@@ -35,6 +35,7 @@ func LoadActors(path string) (*actors.Registry, error) {
 	if err := json.Unmarshal(data, &registry); err != nil {
 		return nil, fmt.Errorf("unmarshal actors: %w", err)
 	}
+	registry.ActivateLegacyDefaults()
 
 	if err := registry.Validate(); err != nil {
 		return nil, fmt.Errorf("loaded actor registry is invalid: %w", err)

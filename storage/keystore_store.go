@@ -35,6 +35,7 @@ func LoadKeystore(path string) (*auth.Keystore, error) {
 	if err := json.Unmarshal(data, &store); err != nil {
 		return nil, fmt.Errorf("unmarshal keystore: %w", err)
 	}
+	store.ActivateLegacyDefaults()
 
 	if err := store.Validate(); err != nil {
 		return nil, fmt.Errorf("loaded keystore is invalid: %w", err)

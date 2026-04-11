@@ -35,6 +35,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "init":
 		return runInit(stdout)
+	case "add-actor":
+		return runAddActor(args[1:], stdout, stderr)
+	case "list-actors":
+		return runListActors(stdout)
+	case "deactivate-actor":
+		return runDeactivateActor(args[1:], stdout, stderr)
 	case "add-record":
 		return runAddRecord(args[1:], stdout, stderr)
 	case "view-chain":
@@ -69,6 +75,59 @@ func runInit(stdout io.Writer) error {
 	}
 
 	_, err = fmt.Fprintf(stdout, "initialized blockchain at %s, actors at %s, and keystore at %s\n", chainPath, actorsPath, keystorePath)
+	return err
+}
+
+func runAddActor(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("add-actor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	roleLong := fs.String("role", "", "actor role")
+	roleShort := fs.String("r", "", "actor role")
+	nameLong := fs.String("name", "", "actor name")
+	nameShort := fs.String("n", "", "actor name")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	role, err := resolveFlagValue("role", *roleLong, "r", *roleShort)
+	if err != nil {
+		return err
+	}
+	name, err := resolveFlagValue("name", *nameLong, "n", *nameShort)
+	if err != nil {
+		return err
+	}
+	if role == "" || name == "" {
+		return fmt.Errorf("both role and name are required")
+	}
+
+	registry, err := loadActorRegistry()
+	if err != nil {
+		return err
+	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
+
+	actor, err := registry.AddActor(role, name)
+	if err != nil {
+		return err
+	}
+	if _, err := store.AddActor(actor.ID, actor.Role); err != nil {
+		return err
+	}
+
+	if err := storage.SaveKeystore(keystorePath, store); err != nil {
+		return err
+	}
+	if err := storage.SaveActors(actorsPath, registry); err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(stdout, "added %s %s (%s)\n", actor.Role, actor.ID, actor.Name)
 	return err
 }
 
@@ -129,11 +188,20 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	if !registry.HasPatient(patientID) {
+	patient, ok := registry.ActorByID(patientID)
+	if !ok || patient.Role != actors.RolePatient {
 		return fmt.Errorf("unknown patient ID: %s", patientID)
 	}
-	if !registry.HasDoctor(doctorID) {
+	if !patient.Active {
+		return fmt.Errorf("patient ID is inactive: %s", patientID)
+	}
+
+	doctor, ok := registry.ActorByID(doctorID)
+	if !ok || doctor.Role != actors.RoleDoctor {
 		return fmt.Errorf("unknown doctor ID: %s", doctorID)
+	}
+	if !doctor.Active {
+		return fmt.Errorf("doctor ID is inactive: %s", doctorID)
 	}
 
 	record := medical.NewRecord(patientID, doctorID, recordType, title, content)
@@ -161,6 +229,83 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	}
 
 	_, err = fmt.Fprintf(stdout, "added record %s in block %d\n", block.Record.RecordID, block.Index)
+	return err
+}
+
+func runListActors(stdout io.Writer) error {
+	registry, err := loadActorRegistry()
+	if err != nil {
+		return err
+	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(stdout, "Patients:")
+	for _, patient := range registry.Patients {
+		fmt.Fprintf(stdout, "  %s  %s  %s  key:%s\n", patient.ID, patient.Name, actorStatus(patient.Active), keystoreStatus(store, patient.ID))
+	}
+	fmt.Fprintln(stdout)
+
+	fmt.Fprintln(stdout, "Doctors:")
+	for _, doctor := range registry.Doctors {
+		fmt.Fprintf(stdout, "  %s  %s  %s  key:%s\n", doctor.ID, doctor.Name, actorStatus(doctor.Active), keystoreStatus(store, doctor.ID))
+	}
+	fmt.Fprintln(stdout)
+
+	fmt.Fprintln(stdout, "Authorities:")
+	for _, authority := range registry.Authorities {
+		fmt.Fprintf(stdout, "  %s  %s  %s  key:%s\n", authority.ID, authority.Name, actorStatus(authority.Active), keystoreStatus(store, authority.ID))
+	}
+
+	return nil
+}
+
+func runDeactivateActor(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("deactivate-actor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	idLong := fs.String("id", "", "actor identifier")
+	idShort := fs.String("i", "", "actor identifier")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	actorID, err := resolveFlagValue("id", *idLong, "i", *idShort)
+	if err != nil {
+		return err
+	}
+	if actorID == "" {
+		return fmt.Errorf("actor ID is required")
+	}
+
+	registry, err := loadActorRegistry()
+	if err != nil {
+		return err
+	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
+
+	actor, err := registry.DeactivateActor(actorID)
+	if err != nil {
+		return err
+	}
+	if err := store.DeactivateActor(actorID); err != nil {
+		return err
+	}
+
+	if err := storage.SaveActors(actorsPath, registry); err != nil {
+		return err
+	}
+	if err := storage.SaveKeystore(keystorePath, store); err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(stdout, "deactivated %s %s (%s)\n", actor.Role, actor.ID, actor.Name)
 	return err
 }
 
@@ -244,6 +389,26 @@ func resolveFlagValue(longName, longValue, shortName, shortValue string) (string
 	return shortValue, nil
 }
 
+func actorStatus(active bool) string {
+	if active {
+		return "active"
+	}
+
+	return "inactive"
+}
+
+func keystoreStatus(store *auth.Keystore, actorID string) string {
+	entry, err := store.EntryForActor(actorID)
+	if err != nil {
+		return "missing"
+	}
+	if entry.Active {
+		return "active"
+	}
+
+	return "inactive"
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Amnesia")
 	fmt.Fprintln(w, "A redactable zero-knowledge blockchain for medical records.")
@@ -254,6 +419,15 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
 	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors plus keys.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  add-actor [--role|-r] <patient|doctor|authority> [--name|-n] <name>")
+	fmt.Fprintln(w, "      Add a new active actor and generate a matching keypair.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  list-actors")
+	fmt.Fprintln(w, "      Show all actors, grouped by role, with actor/key active status.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  deactivate-actor [--id|-i] <actor-id>")
+	fmt.Fprintln(w, "      Mark an actor and its key entry inactive without deleting history.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  add-record [--patient|-p] <id> [--doctor|-d] <id> [--type|-r] <type> [--title|-t] <title> [--content|-c] <content>")
 	fmt.Fprintln(w, "      Add a new medical record to the blockchain.")
@@ -288,4 +462,5 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Example:")
 	fmt.Fprintln(w, `  amnesia add-record -p P007 -d D001 -r diagnosis -t "blood cancer" -c "3 months left"`)
+	fmt.Fprintln(w, `  amnesia add-actor -r doctor -n "Dr. Kapoor"`)
 }

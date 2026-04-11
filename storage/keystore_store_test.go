@@ -32,6 +32,13 @@ func TestSaveAndLoadKeystoreRoundTrip(t *testing.T) {
 	if _, err := loaded.EntryForActor("A001"); err != nil {
 		t.Fatalf("expected authority key to exist: %v", err)
 	}
+	entry, err := loaded.EntryForActiveActor("D001")
+	if err != nil {
+		t.Fatalf("expected doctor key to be active: %v", err)
+	}
+	if !entry.Active {
+		t.Fatalf("expected active key entry")
+	}
 }
 
 func TestLoadKeystoreRejectsTamperedFile(t *testing.T) {
