@@ -1,6 +1,7 @@
 package medical
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -137,4 +138,33 @@ func ParseSequentialRecordID(recordID string) (int, error) {
 	}
 
 	return n, nil
+}
+
+type signableRecordPayload struct {
+	RecordID   string `json:"record_id"`
+	PatientID  string `json:"patient_id"`
+	DoctorID   string `json:"doctor_id"`
+	RecordType string `json:"record_type"`
+	Title      string `json:"title"`
+	Content    string `json:"content"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+func (r MedicalRecord) SignableBytes() ([]byte, error) {
+	payload := signableRecordPayload{
+		RecordID:   r.RecordID,
+		PatientID:  r.PatientID,
+		DoctorID:   r.DoctorID,
+		RecordType: r.RecordType,
+		Title:      r.Title,
+		Content:    r.Content,
+		CreatedAt:  r.CreatedAt,
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal signable record payload: %w", err)
+	}
+
+	return encoded, nil
 }

@@ -6,13 +6,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jeetraj/amnesia/actors"
+	"github.com/jeetraj/amnesia/auth"
 	"github.com/jeetraj/amnesia/core"
 	"github.com/jeetraj/amnesia/medical"
 )
 
 func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 	chain := core.NewBlockchain()
-	if _, err := chain.AddBlock(medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")); err != nil {
+	store, err := auth.NewDemoKeystore(actors.NewDemoRegistry())
+	if err != nil {
+		t.Fatalf("create keystore failed: %v", err)
+	}
+
+	record := medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")
+	record.RecordID = "R001"
+	signature, err := store.SignRecordAsDoctor("D001", record)
+	if err != nil {
+		t.Fatalf("sign record failed: %v", err)
+	}
+
+	if _, err := chain.AddBlock(record, signature); err != nil {
 		t.Fatalf("add block failed: %v", err)
 	}
 
@@ -37,7 +51,19 @@ func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 
 func TestLoadChainRejectsTamperedFile(t *testing.T) {
 	chain := core.NewBlockchain()
-	if _, err := chain.AddBlock(medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")); err != nil {
+	store, err := auth.NewDemoKeystore(actors.NewDemoRegistry())
+	if err != nil {
+		t.Fatalf("create keystore failed: %v", err)
+	}
+
+	record := medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")
+	record.RecordID = "R001"
+	signature, err := store.SignRecordAsDoctor("D001", record)
+	if err != nil {
+		t.Fatalf("sign record failed: %v", err)
+	}
+
+	if _, err := chain.AddBlock(record, signature); err != nil {
 		t.Fatalf("add block failed: %v", err)
 	}
 

@@ -32,7 +32,7 @@ func LoadChain(path string) (*core.Blockchain, error) {
 		return nil, fmt.Errorf("unmarshal chain: %w", err)
 	}
 
-	if err := chain.ValidateChain(); err != nil {
+	if err := chain.ValidateIntegrity(); err != nil {
 		return nil, fmt.Errorf("loaded chain is invalid: %w", err)
 	}
 

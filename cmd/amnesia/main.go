@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/jeetraj/amnesia/actors"
+	"github.com/jeetraj/amnesia/auth"
 	"github.com/jeetraj/amnesia/core"
 	"github.com/jeetraj/amnesia/medical"
 	"github.com/jeetraj/amnesia/storage"
@@ -17,6 +18,7 @@ import (
 
 const chainPath = "chain.json"
 const actorsPath = "actors.json"
+const keystorePath = "keystore.json"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -51,6 +53,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 func runInit(stdout io.Writer) error {
 	chain := core.NewBlockchain()
 	registry := actors.NewDemoRegistry()
+	store, err := auth.NewDemoKeystore(registry)
+	if err != nil {
+		return err
+	}
 
 	if err := storage.SaveChain(chainPath, chain); err != nil {
 		return err
@@ -58,8 +64,11 @@ func runInit(stdout io.Writer) error {
 	if err := storage.SaveActors(actorsPath, registry); err != nil {
 		return err
 	}
+	if err := storage.SaveKeystore(keystorePath, store); err != nil {
+		return err
+	}
 
-	_, err := fmt.Fprintf(stdout, "initialized blockchain at %s and actors at %s\n", chainPath, actorsPath)
+	_, err = fmt.Fprintf(stdout, "initialized blockchain at %s, actors at %s, and keystore at %s\n", chainPath, actorsPath, keystorePath)
 	return err
 }
 
@@ -115,6 +124,10 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
 
 	if !registry.HasPatient(patientID) {
 		return fmt.Errorf("unknown patient ID: %s", patientID)
@@ -124,9 +137,23 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	}
 
 	record := medical.NewRecord(patientID, doctorID, recordType, title, content)
-	block, err := chain.AddBlock(record)
+	recordID, err := chain.NextRecordID()
 	if err != nil {
 		return err
+	}
+	record.RecordID = recordID
+
+	signature, err := store.SignRecordAsDoctor(doctorID, record)
+	if err != nil {
+		return err
+	}
+
+	block, err := chain.AddBlock(record, signature)
+	if err != nil {
+		return err
+	}
+	if err := chain.ValidateChain(store); err != nil {
+		return fmt.Errorf("post-add validation failed: %w", err)
 	}
 
 	if err := storage.SaveChain(chainPath, chain); err != nil {
@@ -157,8 +184,12 @@ func runVerify(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
 
-	if err := chain.ValidateChain(); err != nil {
+	if err := chain.ValidateChain(store); err != nil {
 		return fmt.Errorf("chain validation failed: %w", err)
 	}
 
@@ -190,6 +221,18 @@ func loadActorRegistry() (*actors.Registry, error) {
 	return registry, nil
 }
 
+func loadKeystore() (*auth.Keystore, error) {
+	store, err := storage.LoadKeystore(keystorePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%s not found; run `amnesia init` first", keystorePath)
+		}
+		return nil, err
+	}
+
+	return store, nil
+}
+
 func resolveFlagValue(longName, longValue, shortName, shortValue string) (string, error) {
 	if longValue != "" && shortValue != "" && longValue != shortValue {
 		return "", fmt.Errorf("conflicting values for --%s and -%s", longName, shortName)
@@ -210,7 +253,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
-	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors into actors.json.")
+	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors plus keys.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  add-record [--patient|-p] <id> [--doctor|-d] <id> [--type|-r] <type> [--title|-t] <title> [--content|-c] <content>")
 	fmt.Fprintln(w, "      Add a new medical record to the blockchain.")
@@ -221,7 +264,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "      Print the full blockchain as formatted JSON.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  verify")
-	fmt.Fprintln(w, "      Recalculate hashes and validate the stored chain.")
+	fmt.Fprintln(w, "      Recalculate hashes and validate the stored chain plus doctor signatures.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Supported medical record types:")
 	fmt.Fprintln(w, "  diagnosis           A diagnosis or confirmed condition")
@@ -241,6 +284,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  Patients   : P001, P002, P007")
 	fmt.Fprintln(w, "  Doctors    : D001, D002")
 	fmt.Fprintln(w, "  Authorities: A001")
+	fmt.Fprintln(w, "  Keys       : stored in keystore.json")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Example:")
 	fmt.Fprintln(w, `  amnesia add-record -p P007 -d D001 -r diagnosis -t "blood cancer" -c "3 months left"`)

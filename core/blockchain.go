@@ -2,7 +2,9 @@ package core
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/jeetraj/amnesia/auth"
 	"github.com/jeetraj/amnesia/medical"
 )
 
@@ -16,7 +18,7 @@ func NewBlockchain() *Blockchain {
 	}
 }
 
-func (bc *Blockchain) AddBlock(record medical.MedicalRecord) (Block, error) {
+func (bc *Blockchain) AddBlock(record medical.MedicalRecord, doctorSignature string) (Block, error) {
 	if err := record.ValidateFields(); err != nil {
 		return Block{}, err
 	}
@@ -38,9 +40,12 @@ func (bc *Blockchain) AddBlock(record medical.MedicalRecord) (Block, error) {
 	if bc.HasRecordID(record.RecordID) {
 		return Block{}, fmt.Errorf("duplicate record ID: %s", record.RecordID)
 	}
+	if strings.TrimSpace(doctorSignature) == "" {
+		return Block{}, fmt.Errorf("doctor signature is required")
+	}
 
 	prev := bc.Blocks[len(bc.Blocks)-1]
-	block := NewBlock(prev.Index+1, record, prev.Hash)
+	block := NewBlock(prev.Index+1, record, doctorSignature, prev.Hash)
 	bc.Blocks = append(bc.Blocks, block)
 	return block, nil
 }
@@ -75,7 +80,7 @@ func (bc *Blockchain) NextRecordID() (string, error) {
 	return fmt.Sprintf("R%03d", maxID+1), nil
 }
 
-func (bc *Blockchain) ValidateChain() error {
+func (bc *Blockchain) ValidateIntegrity() error {
 	if len(bc.Blocks) == 0 {
 		return fmt.Errorf("blockchain is empty")
 	}
@@ -109,6 +114,9 @@ func (bc *Blockchain) ValidateChain() error {
 		if curr.Hash != curr.CalculateHash() {
 			return fmt.Errorf("invalid hash at block %d", i)
 		}
+		if strings.TrimSpace(curr.DoctorSignature) == "" {
+			return fmt.Errorf("missing doctor signature at block %d", i)
+		}
 		if err := curr.Record.ValidateStored(); err != nil {
 			return fmt.Errorf("invalid record at block %d: %w", i, err)
 		}
@@ -116,6 +124,24 @@ func (bc *Blockchain) ValidateChain() error {
 			return fmt.Errorf("duplicate record ID at block %d: %s", i, curr.Record.RecordID)
 		}
 		seenRecordIDs[curr.Record.RecordID] = struct{}{}
+	}
+
+	return nil
+}
+
+func (bc *Blockchain) ValidateChain(store *auth.Keystore) error {
+	if err := bc.ValidateIntegrity(); err != nil {
+		return err
+	}
+	if store == nil {
+		return fmt.Errorf("keystore is required for signature validation")
+	}
+
+	for i := 1; i < len(bc.Blocks); i++ {
+		curr := bc.Blocks[i]
+		if err := store.VerifyDoctorRecordSignature(curr.Record, curr.DoctorSignature); err != nil {
+			return fmt.Errorf("invalid doctor signature at block %d: %w", i, err)
+		}
 	}
 
 	return nil
