@@ -47,6 +47,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runViewChain(stdout)
 	case "view-record":
 		return runViewRecord(args[1:], stdout, stderr)
+	case "authorize-redaction":
+		return runAuthorizeRedaction(args[1:], stdout, stderr)
 	case "verify":
 		return runVerify(stdout)
 	case "help", "-h", "--help":
@@ -415,6 +417,135 @@ func runViewRecord(args []string, stdout, stderr io.Writer) error {
 	return err
 }
 
+func runAuthorizeRedaction(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("authorize-redaction", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	recordIDLong := fs.String("record-id", "", "record identifier")
+	recordIDShort := fs.String("i", "", "record identifier")
+	patientIDLong := fs.String("patient", "", "patient identifier")
+	patientIDShort := fs.String("p", "", "patient identifier")
+	authorityIDLong := fs.String("authority", "", "authority identifier")
+	authorityIDShort := fs.String("a", "", "authority identifier")
+	reasonLong := fs.String("reason", "", "redaction reason")
+	reasonShort := fs.String("r", "", "redaction reason")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	recordID, err := resolveFlagValue("record-id", *recordIDLong, "i", *recordIDShort)
+	if err != nil {
+		return err
+	}
+	patientID, err := resolveFlagValue("patient", *patientIDLong, "p", *patientIDShort)
+	if err != nil {
+		return err
+	}
+	authorityID, err := resolveFlagValue("authority", *authorityIDLong, "a", *authorityIDShort)
+	if err != nil {
+		return err
+	}
+	reason, err := resolveFlagValue("reason", *reasonLong, "r", *reasonShort)
+	if err != nil {
+		return err
+	}
+	if recordID == "" || patientID == "" || authorityID == "" || reason == "" {
+		return fmt.Errorf("record-id, patient, authority, and reason are required")
+	}
+
+	chain, err := loadExistingChain()
+	if err != nil {
+		return err
+	}
+	registry, err := loadActorRegistry()
+	if err != nil {
+		return err
+	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
+
+	patient, ok := registry.ActorByID(patientID)
+	if !ok || patient.Role != actors.RolePatient {
+		return fmt.Errorf("unknown patient ID: %s", patientID)
+	}
+	if !patient.Active {
+		return fmt.Errorf("patient ID is inactive: %s", patientID)
+	}
+
+	authority, ok := registry.ActorByID(authorityID)
+	if !ok || authority.Role != actors.RoleAuthority {
+		return fmt.Errorf("unknown authority ID: %s", authorityID)
+	}
+	if !authority.Active {
+		return fmt.Errorf("authority ID is inactive: %s", authorityID)
+	}
+
+	record, err := chain.RecordByID(recordID)
+	if err != nil {
+		return err
+	}
+	if record.IsGenesis() {
+		return fmt.Errorf("cannot authorize redaction for genesis record")
+	}
+	if record.PendingRedaction || record.RedactionRequest != nil || record.RedactionApproval != nil {
+		return fmt.Errorf("redaction authorization already exists for record ID: %s", recordID)
+	}
+
+	patientWrappedKey, err := record.WrappedKeyForActor(patientID)
+	if err != nil {
+		return fmt.Errorf("patient does not have access to record %s: %w", recordID, err)
+	}
+	if patientWrappedKey.ActorRole != actors.RolePatient {
+		return fmt.Errorf("patient wrapped key role mismatch for record %s", recordID)
+	}
+
+	authorityWrappedKey, err := record.WrappedKeyForActor(authorityID)
+	if err != nil {
+		return fmt.Errorf("authority does not have access to record %s: %w", recordID, err)
+	}
+	if authorityWrappedKey.ActorRole != actors.RoleAuthority {
+		return fmt.Errorf("authority wrapped key role mismatch for record %s", recordID)
+	}
+
+	payload, err := store.DecryptRecordForActor(record, authorityID)
+	if err != nil {
+		return err
+	}
+	if payload.PatientID != patientID {
+		return fmt.Errorf("patient ID does not match decrypted record owner: expected %s got %s", payload.PatientID, patientID)
+	}
+
+	request := medical.NewRedactionRequest(recordID, patientID, reason)
+	requestSignature, err := store.SignRedactionRequestAsPatient(patientID, request)
+	if err != nil {
+		return err
+	}
+	request.Signature = requestSignature
+
+	approval := medical.NewRedactionApproval(recordID, patientID, authorityID)
+	approvalSignature, err := store.SignRedactionApprovalAsAuthority(authorityID, approval)
+	if err != nil {
+		return err
+	}
+	approval.Signature = approvalSignature
+
+	if err := chain.AuthorizeRedaction(recordID, request, approval); err != nil {
+		return err
+	}
+	if err := chain.ValidateChain(store); err != nil {
+		return fmt.Errorf("post-authorization validation failed: %w", err)
+	}
+	if err := storage.SaveChain(chainPath, chain); err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(stdout, "authorized redaction for record %s by patient %s and authority %s\n", recordID, patientID, authorityID)
+	return err
+}
+
 func runVerify(stdout io.Writer) error {
 	chain, err := loadExistingChain()
 	if err != nil {
@@ -548,8 +679,11 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  view-record [--record-id|-i] <record-id> [--actor|-a] <actor-id>")
 	fmt.Fprintln(w, "      Decrypt and print one record as a specific active actor.")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  authorize-redaction [--record-id|-i] <record-id> [--patient|-p] <patient-id> [--authority|-a] <authority-id> [--reason|-r] <reason>")
+	fmt.Fprintln(w, "      Attach signed patient request and authority approval metadata to a record.")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  verify")
-	fmt.Fprintln(w, "      Recalculate hashes and validate the stored encrypted chain plus doctor signatures.")
+	fmt.Fprintln(w, "      Recalculate hashes and validate the stored encrypted chain plus doctor, patient, and authority signatures.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Supported medical record types:")
 	fmt.Fprintln(w, "  diagnosis           A diagnosis or confirmed condition")
@@ -574,5 +708,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Example:")
 	fmt.Fprintln(w, `  amnesia add-record -p P007 -d D001 -r diagnosis -t "blood cancer" -c "3 months left"`)
 	fmt.Fprintln(w, `  amnesia view-record -i R001 -a D001`)
+	fmt.Fprintln(w, `  amnesia authorize-redaction -i R001 -p P007 -a A001 -r "patient requests deletion"`)
 	fmt.Fprintln(w, `  amnesia add-actor -r doctor -n "Dr. Kapoor"`)
 }

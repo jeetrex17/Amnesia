@@ -19,10 +19,11 @@ type MedicalRecord struct {
 }
 
 var (
-	recordIDPattern  = regexp.MustCompile(`^R([0-9]+)$`)
-	patientIDPattern = regexp.MustCompile(`^P[0-9]+$`)
-	doctorIDPattern  = regexp.MustCompile(`^D[0-9]+$`)
-	allowedTypes     = map[string]struct{}{
+	recordIDPattern    = regexp.MustCompile(`^R([0-9]+)$`)
+	patientIDPattern   = regexp.MustCompile(`^P[0-9]+$`)
+	doctorIDPattern    = regexp.MustCompile(`^D[0-9]+$`)
+	authorityIDPattern = regexp.MustCompile(`^A[0-9]+$`)
+	allowedTypes       = map[string]struct{}{
 		"diagnosis":          {},
 		"prescription":       {},
 		"lab_result":         {},
@@ -60,6 +61,17 @@ func ValidateRecordType(recordType string) error {
 	}
 	if _, ok := allowedTypes[recordType]; !ok {
 		return fmt.Errorf("unsupported record type: %s", recordType)
+	}
+
+	return nil
+}
+
+func ValidateAuthorityID(authorityID string) error {
+	if strings.TrimSpace(authorityID) == "" {
+		return fmt.Errorf("authority ID is required")
+	}
+	if !authorityIDPattern.MatchString(authorityID) {
+		return fmt.Errorf("invalid authority ID format: %s", authorityID)
 	}
 
 	return nil

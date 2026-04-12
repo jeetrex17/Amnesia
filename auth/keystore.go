@@ -281,19 +281,69 @@ func (e Entry) EncryptionPrivateKeyBytes() (*ecdh.PrivateKey, error) {
 }
 
 func (k *Keystore) SignRecordAsDoctor(doctorID string, record medical.EncryptedRecord) (string, error) {
-	entry, err := k.EntryForActiveActor(doctorID)
+	payload, err := record.SignableBytes()
 	if err != nil {
 		return "", err
 	}
-	if entry.Role != actors.RoleDoctor {
-		return "", fmt.Errorf("actor %s is not a doctor", doctorID)
+
+	return k.signPayloadAsActiveActor(doctorID, actors.RoleDoctor, payload)
+}
+
+func (k *Keystore) VerifyDoctorRecordSignature(record medical.EncryptedRecord, signature string) error {
+	payload, err := record.SignableBytes()
+	if err != nil {
+		return err
+	}
+
+	return k.verifyPayloadSignature(record.DoctorID, actors.RoleDoctor, payload, signature, "doctor")
+}
+
+func (k *Keystore) SignRedactionRequestAsPatient(patientID string, request medical.RedactionRequest) (string, error) {
+	payload, err := request.SignableBytes()
+	if err != nil {
+		return "", err
+	}
+
+	return k.signPayloadAsActiveActor(patientID, actors.RolePatient, payload)
+}
+
+func (k *Keystore) VerifyRedactionRequestSignature(request medical.RedactionRequest) error {
+	payload, err := request.SignableBytes()
+	if err != nil {
+		return err
+	}
+
+	return k.verifyPayloadSignature(request.PatientID, actors.RolePatient, payload, request.Signature, "redaction request")
+}
+
+func (k *Keystore) SignRedactionApprovalAsAuthority(authorityID string, approval medical.RedactionApproval) (string, error) {
+	payload, err := approval.SignableBytes()
+	if err != nil {
+		return "", err
+	}
+
+	return k.signPayloadAsActiveActor(authorityID, actors.RoleAuthority, payload)
+}
+
+func (k *Keystore) VerifyRedactionApprovalSignature(approval medical.RedactionApproval) error {
+	payload, err := approval.SignableBytes()
+	if err != nil {
+		return err
+	}
+
+	return k.verifyPayloadSignature(approval.AuthorityID, actors.RoleAuthority, payload, approval.Signature, "redaction approval")
+}
+
+func (k *Keystore) signPayloadAsActiveActor(actorID, role string, payload []byte) (string, error) {
+	entry, err := k.EntryForActiveActor(actorID)
+	if err != nil {
+		return "", err
+	}
+	if entry.Role != role {
+		return "", fmt.Errorf("actor %s is not a %s", actorID, role)
 	}
 
 	privateKey, err := entry.SigningPrivateKeyBytes()
-	if err != nil {
-		return "", err
-	}
-	payload, err := record.SignableBytes()
 	if err != nil {
 		return "", err
 	}
@@ -302,13 +352,13 @@ func (k *Keystore) SignRecordAsDoctor(doctorID string, record medical.EncryptedR
 	return base64.StdEncoding.EncodeToString(signature), nil
 }
 
-func (k *Keystore) VerifyDoctorRecordSignature(record medical.EncryptedRecord, signature string) error {
-	entry, err := k.EntryForActor(record.DoctorID)
+func (k *Keystore) verifyPayloadSignature(actorID, role string, payload []byte, signature, label string) error {
+	entry, err := k.EntryForActor(actorID)
 	if err != nil {
 		return err
 	}
-	if entry.Role != actors.RoleDoctor {
-		return fmt.Errorf("actor %s is not a doctor", record.DoctorID)
+	if entry.Role != role {
+		return fmt.Errorf("actor %s is not a %s", actorID, role)
 	}
 
 	publicKey, err := entry.SigningPublicKeyBytes()
@@ -317,18 +367,13 @@ func (k *Keystore) VerifyDoctorRecordSignature(record medical.EncryptedRecord, s
 	}
 	signatureBytes, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
-		return fmt.Errorf("decode doctor signature: %w", err)
+		return fmt.Errorf("decode %s signature: %w", label, err)
 	}
 	if len(signatureBytes) != ed25519.SignatureSize {
 		return fmt.Errorf("unexpected signature length: %d", len(signatureBytes))
 	}
-
-	payload, err := record.SignableBytes()
-	if err != nil {
-		return err
-	}
 	if !ed25519.Verify(publicKey, payload, signatureBytes) {
-		return fmt.Errorf("invalid doctor signature for doctor ID: %s", record.DoctorID)
+		return fmt.Errorf("invalid %s signature for actor ID: %s", label, actorID)
 	}
 
 	return nil

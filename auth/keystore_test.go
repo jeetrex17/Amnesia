@@ -147,3 +147,39 @@ func TestDecryptRecordRejectsUnrelatedOrInactiveActor(t *testing.T) {
 		t.Fatalf("expected inactive actor decryption to fail")
 	}
 }
+
+func TestSignAndVerifyRedactionRequest(t *testing.T) {
+	store, err := NewDemoKeystore(actors.NewDemoRegistry())
+	if err != nil {
+		t.Fatalf("create keystore failed: %v", err)
+	}
+
+	request := medical.NewRedactionRequest("R001", "P001", "patient requested deletion")
+	signature, err := store.SignRedactionRequestAsPatient("P001", request)
+	if err != nil {
+		t.Fatalf("sign redaction request failed: %v", err)
+	}
+	request.Signature = signature
+
+	if err := store.VerifyRedactionRequestSignature(request); err != nil {
+		t.Fatalf("verify redaction request failed: %v", err)
+	}
+}
+
+func TestSignAndVerifyRedactionApproval(t *testing.T) {
+	store, err := NewDemoKeystore(actors.NewDemoRegistry())
+	if err != nil {
+		t.Fatalf("create keystore failed: %v", err)
+	}
+
+	approval := medical.NewRedactionApproval("R001", "P001", "A001")
+	signature, err := store.SignRedactionApprovalAsAuthority("A001", approval)
+	if err != nil {
+		t.Fatalf("sign redaction approval failed: %v", err)
+	}
+	approval.Signature = signature
+
+	if err := store.VerifyRedactionApprovalSignature(approval); err != nil {
+		t.Fatalf("verify redaction approval failed: %v", err)
+	}
+}

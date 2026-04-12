@@ -100,6 +100,67 @@ func TestValidateChainRejectsInvalidDoctorSignature(t *testing.T) {
 	}
 }
 
+func TestAuthorizeRedactionAddsSignedMetadata(t *testing.T) {
+	chain := NewBlockchain()
+	store := newTestKeystore(t)
+	block := addSignedBlock(t, chain, store, medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Signed"))
+
+	request := medical.NewRedactionRequest(block.Record.RecordID, "P001", "patient requested deletion")
+	requestSignature, err := store.SignRedactionRequestAsPatient("P001", request)
+	if err != nil {
+		t.Fatalf("sign redaction request failed: %v", err)
+	}
+	request.Signature = requestSignature
+
+	approval := medical.NewRedactionApproval(block.Record.RecordID, "P001", "A001")
+	approvalSignature, err := store.SignRedactionApprovalAsAuthority("A001", approval)
+	if err != nil {
+		t.Fatalf("sign redaction approval failed: %v", err)
+	}
+	approval.Signature = approvalSignature
+
+	if err := chain.AuthorizeRedaction(block.Record.RecordID, request, approval); err != nil {
+		t.Fatalf("authorize redaction failed: %v", err)
+	}
+	if !chain.Blocks[1].Record.PendingRedaction {
+		t.Fatalf("expected record to be marked pending redaction")
+	}
+	if err := chain.ValidateChain(store); err != nil {
+		t.Fatalf("expected valid chain after redaction authorization, got: %v", err)
+	}
+}
+
+func TestValidateChainRejectsTamperedRedactionRequest(t *testing.T) {
+	chain := NewBlockchain()
+	store := newTestKeystore(t)
+	block := addSignedBlock(t, chain, store, medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Signed"))
+
+	request := medical.NewRedactionRequest(block.Record.RecordID, "P001", "patient requested deletion")
+	requestSignature, err := store.SignRedactionRequestAsPatient("P001", request)
+	if err != nil {
+		t.Fatalf("sign redaction request failed: %v", err)
+	}
+	request.Signature = requestSignature
+
+	approval := medical.NewRedactionApproval(block.Record.RecordID, "P001", "A001")
+	approvalSignature, err := store.SignRedactionApprovalAsAuthority("A001", approval)
+	if err != nil {
+		t.Fatalf("sign redaction approval failed: %v", err)
+	}
+	approval.Signature = approvalSignature
+
+	if err := chain.AuthorizeRedaction(block.Record.RecordID, request, approval); err != nil {
+		t.Fatalf("authorize redaction failed: %v", err)
+	}
+
+	chain.Blocks[1].Record.RedactionRequest.Reason = "tampered"
+	chain.Blocks[1].Hash = chain.Blocks[1].CalculateHash()
+
+	if err := chain.ValidateChain(store); err == nil {
+		t.Fatalf("expected tampered redaction request to be rejected")
+	}
+}
+
 func newTestKeystore(t *testing.T) *auth.Keystore {
 	t.Helper()
 

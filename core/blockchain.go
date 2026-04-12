@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/auth"
 	"github.com/jeetraj/amnesia/medical"
 )
@@ -75,6 +76,44 @@ func (bc *Blockchain) NextRecordID() (string, error) {
 	return fmt.Sprintf("R%03d", maxID+1), nil
 }
 
+func (bc *Blockchain) AuthorizeRedaction(recordID string, request medical.RedactionRequest, approval medical.RedactionApproval) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if err := approval.Validate(); err != nil {
+		return err
+	}
+
+	for i := range bc.Blocks {
+		if bc.Blocks[i].Record.RecordID != recordID {
+			continue
+		}
+		if bc.Blocks[i].Record.IsGenesis() {
+			return fmt.Errorf("cannot authorize redaction for genesis record")
+		}
+		if bc.Blocks[i].Record.PendingRedaction || bc.Blocks[i].Record.RedactionRequest != nil || bc.Blocks[i].Record.RedactionApproval != nil {
+			return fmt.Errorf("redaction authorization already exists for record ID: %s", recordID)
+		}
+		if request.RecordID != recordID {
+			return fmt.Errorf("redaction request record ID mismatch: %s", request.RecordID)
+		}
+		if approval.RecordID != recordID {
+			return fmt.Errorf("redaction approval record ID mismatch: %s", approval.RecordID)
+		}
+		if request.PatientID != approval.PatientID {
+			return fmt.Errorf("redaction patient mismatch between request and approval")
+		}
+
+		bc.Blocks[i].Record.PendingRedaction = true
+		bc.Blocks[i].Record.RedactionRequest = &request
+		bc.Blocks[i].Record.RedactionApproval = &approval
+		bc.rehashFrom(i)
+		return nil
+	}
+
+	return fmt.Errorf("record not found: %s", recordID)
+}
+
 func (bc *Blockchain) ValidateIntegrity() error {
 	if len(bc.Blocks) == 0 {
 		return fmt.Errorf("blockchain is empty")
@@ -137,7 +176,42 @@ func (bc *Blockchain) ValidateChain(store *auth.Keystore) error {
 		if err := store.VerifyDoctorRecordSignature(curr.Record, curr.DoctorSignature); err != nil {
 			return fmt.Errorf("invalid doctor signature at block %d: %w", i, err)
 		}
+		if curr.Record.PendingRedaction {
+			if err := store.VerifyRedactionRequestSignature(*curr.Record.RedactionRequest); err != nil {
+				return fmt.Errorf("invalid redaction request signature at block %d: %w", i, err)
+			}
+			if err := store.VerifyRedactionApprovalSignature(*curr.Record.RedactionApproval); err != nil {
+				return fmt.Errorf("invalid redaction approval signature at block %d: %w", i, err)
+			}
+
+			patientWrappedKey, err := curr.Record.WrappedKeyForActor(curr.Record.RedactionRequest.PatientID)
+			if err != nil {
+				return fmt.Errorf("missing patient wrapped key at block %d: %w", i, err)
+			}
+			if patientWrappedKey.ActorRole != actors.RolePatient {
+				return fmt.Errorf("patient wrapped key role mismatch at block %d", i)
+			}
+
+			authorityWrappedKey, err := curr.Record.WrappedKeyForActor(curr.Record.RedactionApproval.AuthorityID)
+			if err != nil {
+				return fmt.Errorf("missing authority wrapped key at block %d: %w", i, err)
+			}
+			if authorityWrappedKey.ActorRole != actors.RoleAuthority {
+				return fmt.Errorf("authority wrapped key role mismatch at block %d", i)
+			}
+		}
 	}
 
 	return nil
+}
+
+func (bc *Blockchain) rehashFrom(index int) {
+	for i := index; i < len(bc.Blocks); i++ {
+		if i == 0 {
+			bc.Blocks[i].PrevHash = ""
+		} else {
+			bc.Blocks[i].PrevHash = bc.Blocks[i-1].Hash
+		}
+		bc.Blocks[i].Hash = bc.Blocks[i].CalculateHash()
+	}
 }
