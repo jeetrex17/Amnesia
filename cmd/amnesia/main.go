@@ -45,6 +45,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runAddRecord(args[1:], stdout, stderr)
 	case "view-chain":
 		return runViewChain(stdout)
+	case "view-record":
+		return runViewRecord(args[1:], stdout, stderr)
 	case "verify":
 		return runVerify(stdout)
 	case "help", "-h", "--help":
@@ -211,12 +213,16 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	}
 	record.RecordID = recordID
 
-	signature, err := store.SignRecordAsDoctor(doctorID, record)
+	encryptedRecord, err := store.EncryptRecord(record, activeAuthorities(registry))
+	if err != nil {
+		return err
+	}
+	signature, err := store.SignRecordAsDoctor(doctorID, encryptedRecord)
 	if err != nil {
 		return err
 	}
 
-	block, err := chain.AddBlock(record, signature)
+	block, err := chain.AddBlock(encryptedRecord, signature)
 	if err != nil {
 		return err
 	}
@@ -225,6 +231,9 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	}
 
 	if err := storage.SaveChain(chainPath, chain); err != nil {
+		return err
+	}
+	if err := storage.SaveKeystore(keystorePath, store); err != nil {
 		return err
 	}
 
@@ -324,6 +333,88 @@ func runViewChain(stdout io.Writer) error {
 	return err
 }
 
+func runViewRecord(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("view-record", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	recordIDLong := fs.String("record-id", "", "record identifier")
+	recordIDShort := fs.String("i", "", "record identifier")
+	actorIDLong := fs.String("actor", "", "actor identifier")
+	actorIDShort := fs.String("a", "", "actor identifier")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	recordID, err := resolveFlagValue("record-id", *recordIDLong, "i", *recordIDShort)
+	if err != nil {
+		return err
+	}
+	actorID, err := resolveFlagValue("actor", *actorIDLong, "a", *actorIDShort)
+	if err != nil {
+		return err
+	}
+	if recordID == "" || actorID == "" {
+		return fmt.Errorf("both record-id and actor are required")
+	}
+
+	chain, err := loadExistingChain()
+	if err != nil {
+		return err
+	}
+	registry, err := loadActorRegistry()
+	if err != nil {
+		return err
+	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
+
+	actor, ok := registry.ActorByID(actorID)
+	if !ok {
+		return fmt.Errorf("unknown actor ID: %s", actorID)
+	}
+	if !actor.Active {
+		return fmt.Errorf("actor ID is inactive: %s", actorID)
+	}
+
+	record, err := chain.RecordByID(recordID)
+	if err != nil {
+		return err
+	}
+	payload, err := store.DecryptRecordForActor(record, actorID)
+	if err != nil {
+		return err
+	}
+
+	view := struct {
+		RecordID   string `json:"record_id"`
+		DoctorID   string `json:"doctor_id"`
+		RecordType string `json:"record_type"`
+		CreatedAt  int64  `json:"created_at"`
+		PatientID  string `json:"patient_id"`
+		Title      string `json:"title"`
+		Content    string `json:"content"`
+	}{
+		RecordID:   record.RecordID,
+		DoctorID:   record.DoctorID,
+		RecordType: record.RecordType,
+		CreatedAt:  record.CreatedAt,
+		PatientID:  payload.PatientID,
+		Title:      payload.Title,
+		Content:    payload.Content,
+	}
+
+	output, err := json.MarshalIndent(view, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal decrypted record: %w", err)
+	}
+
+	_, err = fmt.Fprintln(stdout, string(output))
+	return err
+}
+
 func runVerify(stdout io.Writer) error {
 	chain, err := loadExistingChain()
 	if err != nil {
@@ -409,6 +500,23 @@ func keystoreStatus(store *auth.Keystore, actorID string) string {
 	return "inactive"
 }
 
+func activeAuthorities(registry *actors.Registry) []actors.ActorInfo {
+	authorities := make([]actors.ActorInfo, 0, len(registry.Authorities))
+	for _, authority := range registry.Authorities {
+		if !authority.Active {
+			continue
+		}
+		authorities = append(authorities, actors.ActorInfo{
+			ID:     authority.ID,
+			Name:   authority.Name,
+			Role:   actors.RoleAuthority,
+			Active: true,
+		})
+	}
+
+	return authorities
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Amnesia")
 	fmt.Fprintln(w, "A redactable zero-knowledge blockchain for medical records.")
@@ -435,10 +543,13 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "      Short aliases: -p patient, -d doctor, -r type, -t title, -c content")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  view-chain")
-	fmt.Fprintln(w, "      Print the full blockchain as formatted JSON.")
+	fmt.Fprintln(w, "      Print the full blockchain as formatted JSON. Record payloads stay encrypted.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  view-record [--record-id|-i] <record-id> [--actor|-a] <actor-id>")
+	fmt.Fprintln(w, "      Decrypt and print one record as a specific active actor.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  verify")
-	fmt.Fprintln(w, "      Recalculate hashes and validate the stored chain plus doctor signatures.")
+	fmt.Fprintln(w, "      Recalculate hashes and validate the stored encrypted chain plus doctor signatures.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Supported medical record types:")
 	fmt.Fprintln(w, "  diagnosis           A diagnosis or confirmed condition")
@@ -462,5 +573,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Example:")
 	fmt.Fprintln(w, `  amnesia add-record -p P007 -d D001 -r diagnosis -t "blood cancer" -c "3 months left"`)
+	fmt.Fprintln(w, `  amnesia view-record -i R001 -a D001`)
 	fmt.Fprintln(w, `  amnesia add-actor -r doctor -n "Dr. Kapoor"`)
 }

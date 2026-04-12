@@ -32,6 +32,39 @@ var (
 	}
 )
 
+func ValidatePatientID(patientID string) error {
+	if strings.TrimSpace(patientID) == "" {
+		return fmt.Errorf("patient ID is required")
+	}
+	if !patientIDPattern.MatchString(patientID) {
+		return fmt.Errorf("invalid patient ID format: %s", patientID)
+	}
+
+	return nil
+}
+
+func ValidateDoctorID(doctorID string) error {
+	if strings.TrimSpace(doctorID) == "" {
+		return fmt.Errorf("doctor ID is required")
+	}
+	if !doctorIDPattern.MatchString(doctorID) {
+		return fmt.Errorf("invalid doctor ID format: %s", doctorID)
+	}
+
+	return nil
+}
+
+func ValidateRecordType(recordType string) error {
+	if strings.TrimSpace(recordType) == "" {
+		return fmt.Errorf("record type is required")
+	}
+	if _, ok := allowedTypes[recordType]; !ok {
+		return fmt.Errorf("unsupported record type: %s", recordType)
+	}
+
+	return nil
+}
+
 func NewRecord(patientID, doctorID, recordType, title, content string) MedicalRecord {
 	return NewRecordWithID("", patientID, doctorID, recordType, title, content)
 }
@@ -69,25 +102,15 @@ func (r MedicalRecord) ValidateFields() error {
 		return nil
 	}
 
-	if strings.TrimSpace(r.PatientID) == "" {
-		return fmt.Errorf("patient ID is required")
-	}
-	if !patientIDPattern.MatchString(r.PatientID) {
-		return fmt.Errorf("invalid patient ID format: %s", r.PatientID)
+	if err := ValidatePatientID(r.PatientID); err != nil {
+		return err
 	}
 
-	if strings.TrimSpace(r.DoctorID) == "" {
-		return fmt.Errorf("doctor ID is required")
+	if err := ValidateDoctorID(r.DoctorID); err != nil {
+		return err
 	}
-	if !doctorIDPattern.MatchString(r.DoctorID) {
-		return fmt.Errorf("invalid doctor ID format: %s", r.DoctorID)
-	}
-
-	if strings.TrimSpace(r.RecordType) == "" {
-		return fmt.Errorf("record type is required")
-	}
-	if _, ok := allowedTypes[r.RecordType]; !ok {
-		return fmt.Errorf("unsupported record type: %s", r.RecordType)
+	if err := ValidateRecordType(r.RecordType); err != nil {
+		return err
 	}
 
 	if strings.TrimSpace(r.Title) == "" {

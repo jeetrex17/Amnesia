@@ -18,25 +18,10 @@ func NewBlockchain() *Blockchain {
 	}
 }
 
-func (bc *Blockchain) AddBlock(record medical.MedicalRecord, doctorSignature string) (Block, error) {
-	if err := record.ValidateFields(); err != nil {
+func (bc *Blockchain) AddBlock(record medical.EncryptedRecord, doctorSignature string) (Block, error) {
+	if err := record.ValidateStored(); err != nil {
 		return Block{}, err
 	}
-
-	if record.RecordID == "" {
-		nextID, err := bc.NextRecordID()
-		if err != nil {
-			return Block{}, err
-		}
-		record.RecordID = nextID
-	}
-
-	if !record.IsGenesis() {
-		if _, err := medical.ParseSequentialRecordID(record.RecordID); err != nil {
-			return Block{}, err
-		}
-	}
-
 	if bc.HasRecordID(record.RecordID) {
 		return Block{}, fmt.Errorf("duplicate record ID: %s", record.RecordID)
 	}
@@ -58,6 +43,16 @@ func (bc *Blockchain) HasRecordID(recordID string) bool {
 	}
 
 	return false
+}
+
+func (bc *Blockchain) RecordByID(recordID string) (medical.EncryptedRecord, error) {
+	for _, block := range bc.Blocks {
+		if block.Record.RecordID == recordID {
+			return block.Record, nil
+		}
+	}
+
+	return medical.EncryptedRecord{}, fmt.Errorf("record not found: %s", recordID)
 }
 
 func (bc *Blockchain) NextRecordID() (string, error) {

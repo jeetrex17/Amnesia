@@ -39,6 +39,9 @@ func TestSaveAndLoadKeystoreRoundTrip(t *testing.T) {
 	if !entry.Active {
 		t.Fatalf("expected active key entry")
 	}
+	if entry.EncryptionPublicKey == "" || entry.EncryptionPrivateKey == "" {
+		t.Fatalf("expected encryption keypair to round-trip")
+	}
 }
 
 func TestLoadKeystoreRejectsTamperedFile(t *testing.T) {

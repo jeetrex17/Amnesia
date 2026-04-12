@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -11,11 +12,13 @@ import (
 )
 
 type Entry struct {
-	ActorID    string `json:"actor_id"`
-	Role       string `json:"role"`
-	PublicKey  string `json:"public_key"`
-	PrivateKey string `json:"private_key"`
-	Active     bool   `json:"active"`
+	ActorID              string `json:"actor_id"`
+	Role                 string `json:"role"`
+	SigningPublicKey     string `json:"public_key"`
+	SigningPrivateKey    string `json:"private_key"`
+	EncryptionPublicKey  string `json:"encryption_public_key"`
+	EncryptionPrivateKey string `json:"encryption_private_key"`
+	Active               bool   `json:"active"`
 }
 
 type Keystore struct {
@@ -61,17 +64,23 @@ func NewDemoKeystore(registry *actors.Registry) (*Keystore, error) {
 }
 
 func generateEntry(actorID, role string) (Entry, error) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	signingPublicKey, signingPrivateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return Entry{}, fmt.Errorf("generate keypair for %s: %w", actorID, err)
+		return Entry{}, fmt.Errorf("generate signing keypair for %s: %w", actorID, err)
+	}
+	encryptionPublicKey, encryptionPrivateKey, err := generateEncryptionKeypair()
+	if err != nil {
+		return Entry{}, fmt.Errorf("generate encryption keypair for %s: %w", actorID, err)
 	}
 
 	return Entry{
-		ActorID:    actorID,
-		Role:       role,
-		PublicKey:  base64.StdEncoding.EncodeToString(publicKey),
-		PrivateKey: base64.StdEncoding.EncodeToString(privateKey),
-		Active:     true,
+		ActorID:              actorID,
+		Role:                 role,
+		SigningPublicKey:     base64.StdEncoding.EncodeToString(signingPublicKey),
+		SigningPrivateKey:    base64.StdEncoding.EncodeToString(signingPrivateKey),
+		EncryptionPublicKey:  base64.StdEncoding.EncodeToString(encryptionPublicKey.Bytes()),
+		EncryptionPrivateKey: base64.StdEncoding.EncodeToString(encryptionPrivateKey.Bytes()),
+		Active:               true,
 	}, nil
 }
 
@@ -93,18 +102,32 @@ func (k *Keystore) Validate() error {
 		}
 		seen[entry.ActorID] = struct{}{}
 
-		publicKey, err := entry.PublicKeyBytes()
+		publicKey, err := entry.SigningPublicKeyBytes()
 		if err != nil {
-			return fmt.Errorf("invalid public key for %s: %w", entry.ActorID, err)
+			return fmt.Errorf("invalid signing public key for %s: %w", entry.ActorID, err)
 		}
-		privateKey, err := entry.PrivateKeyBytes()
+		privateKey, err := entry.SigningPrivateKeyBytes()
 		if err != nil {
-			return fmt.Errorf("invalid private key for %s: %w", entry.ActorID, err)
+			return fmt.Errorf("invalid signing private key for %s: %w", entry.ActorID, err)
 		}
 
 		derivedPublicKey := privateKey.Public().(ed25519.PublicKey)
 		if string(derivedPublicKey) != string(publicKey) {
-			return fmt.Errorf("public/private key mismatch for %s", entry.ActorID)
+			return fmt.Errorf("signing public/private key mismatch for %s", entry.ActorID)
+		}
+
+		encryptionPublicKey, err := entry.EncryptionPublicKeyBytes()
+		if err != nil {
+			return fmt.Errorf("invalid encryption public key for %s: %w", entry.ActorID, err)
+		}
+		encryptionPrivateKey, err := entry.EncryptionPrivateKeyBytes()
+		if err != nil {
+			return fmt.Errorf("invalid encryption private key for %s: %w", entry.ActorID, err)
+		}
+
+		derivedEncryptionPublicKey := encryptionPrivateKey.PublicKey()
+		if string(derivedEncryptionPublicKey.Bytes()) != string(encryptionPublicKey.Bytes()) {
+			return fmt.Errorf("encryption public/private key mismatch for %s", entry.ActorID)
 		}
 	}
 
@@ -129,6 +152,23 @@ func (k *Keystore) ActivateLegacyDefaults() {
 	for i := range k.Entries {
 		k.Entries[i].Active = true
 	}
+}
+
+func (k *Keystore) PopulateMissingEncryptionKeys() error {
+	for i := range k.Entries {
+		if k.Entries[i].EncryptionPublicKey != "" && k.Entries[i].EncryptionPrivateKey != "" {
+			continue
+		}
+
+		publicKey, privateKey, err := generateEncryptionKeypair()
+		if err != nil {
+			return fmt.Errorf("generate encryption keypair for %s: %w", k.Entries[i].ActorID, err)
+		}
+		k.Entries[i].EncryptionPublicKey = base64.StdEncoding.EncodeToString(publicKey.Bytes())
+		k.Entries[i].EncryptionPrivateKey = base64.StdEncoding.EncodeToString(privateKey.Bytes())
+	}
+
+	return nil
 }
 
 func (k *Keystore) EntryForActor(actorID string) (Entry, error) {
@@ -188,31 +228,59 @@ func (k *Keystore) DeactivateActor(actorID string) error {
 	return fmt.Errorf("keystore entry not found for actor ID: %s", actorID)
 }
 
-func (e Entry) PublicKeyBytes() (ed25519.PublicKey, error) {
-	decoded, err := base64.StdEncoding.DecodeString(e.PublicKey)
+func (e Entry) SigningPublicKeyBytes() (ed25519.PublicKey, error) {
+	decoded, err := base64.StdEncoding.DecodeString(e.SigningPublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("decode public key: %w", err)
+		return nil, fmt.Errorf("decode signing public key: %w", err)
 	}
 	if len(decoded) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("unexpected public key length: %d", len(decoded))
+		return nil, fmt.Errorf("unexpected signing public key length: %d", len(decoded))
 	}
 
 	return ed25519.PublicKey(decoded), nil
 }
 
-func (e Entry) PrivateKeyBytes() (ed25519.PrivateKey, error) {
-	decoded, err := base64.StdEncoding.DecodeString(e.PrivateKey)
+func (e Entry) SigningPrivateKeyBytes() (ed25519.PrivateKey, error) {
+	decoded, err := base64.StdEncoding.DecodeString(e.SigningPrivateKey)
 	if err != nil {
-		return nil, fmt.Errorf("decode private key: %w", err)
+		return nil, fmt.Errorf("decode signing private key: %w", err)
 	}
 	if len(decoded) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("unexpected private key length: %d", len(decoded))
+		return nil, fmt.Errorf("unexpected signing private key length: %d", len(decoded))
 	}
 
 	return ed25519.PrivateKey(decoded), nil
 }
 
-func (k *Keystore) SignRecordAsDoctor(doctorID string, record medical.MedicalRecord) (string, error) {
+func (e Entry) EncryptionPublicKeyBytes() (*ecdh.PublicKey, error) {
+	decoded, err := base64.StdEncoding.DecodeString(e.EncryptionPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode encryption public key: %w", err)
+	}
+
+	publicKey, err := ecdh.X25519().NewPublicKey(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("build encryption public key: %w", err)
+	}
+
+	return publicKey, nil
+}
+
+func (e Entry) EncryptionPrivateKeyBytes() (*ecdh.PrivateKey, error) {
+	decoded, err := base64.StdEncoding.DecodeString(e.EncryptionPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode encryption private key: %w", err)
+	}
+
+	privateKey, err := ecdh.X25519().NewPrivateKey(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("build encryption private key: %w", err)
+	}
+
+	return privateKey, nil
+}
+
+func (k *Keystore) SignRecordAsDoctor(doctorID string, record medical.EncryptedRecord) (string, error) {
 	entry, err := k.EntryForActiveActor(doctorID)
 	if err != nil {
 		return "", err
@@ -221,7 +289,7 @@ func (k *Keystore) SignRecordAsDoctor(doctorID string, record medical.MedicalRec
 		return "", fmt.Errorf("actor %s is not a doctor", doctorID)
 	}
 
-	privateKey, err := entry.PrivateKeyBytes()
+	privateKey, err := entry.SigningPrivateKeyBytes()
 	if err != nil {
 		return "", err
 	}
@@ -234,7 +302,7 @@ func (k *Keystore) SignRecordAsDoctor(doctorID string, record medical.MedicalRec
 	return base64.StdEncoding.EncodeToString(signature), nil
 }
 
-func (k *Keystore) VerifyDoctorRecordSignature(record medical.MedicalRecord, signature string) error {
+func (k *Keystore) VerifyDoctorRecordSignature(record medical.EncryptedRecord, signature string) error {
 	entry, err := k.EntryForActor(record.DoctorID)
 	if err != nil {
 		return err
@@ -243,7 +311,7 @@ func (k *Keystore) VerifyDoctorRecordSignature(record medical.MedicalRecord, sig
 		return fmt.Errorf("actor %s is not a doctor", record.DoctorID)
 	}
 
-	publicKey, err := entry.PublicKeyBytes()
+	publicKey, err := entry.SigningPublicKeyBytes()
 	if err != nil {
 		return err
 	}

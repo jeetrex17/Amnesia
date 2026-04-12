@@ -11,23 +11,23 @@ import (
 )
 
 type Block struct {
-	Index           int                   `json:"index"`
-	Timestamp       int64                 `json:"timestamp"`
-	Record          medical.MedicalRecord `json:"record"`
-	DoctorSignature string                `json:"doctor_signature"`
-	PrevHash        string                `json:"prev_hash"`
-	Hash            string                `json:"hash"`
+	Index           int                     `json:"index"`
+	Timestamp       int64                   `json:"timestamp"`
+	Record          medical.EncryptedRecord `json:"record"`
+	DoctorSignature string                  `json:"doctor_signature"`
+	PrevHash        string                  `json:"prev_hash"`
+	Hash            string                  `json:"hash"`
 }
 
 type blockHashPayload struct {
-	Index           int                   `json:"index"`
-	Timestamp       int64                 `json:"timestamp"`
-	Record          medical.MedicalRecord `json:"record"`
-	DoctorSignature string                `json:"doctor_signature"`
-	PrevHash        string                `json:"prev_hash"`
+	Index           int                     `json:"index"`
+	Timestamp       int64                   `json:"timestamp"`
+	Record          medical.EncryptedRecord `json:"record"`
+	DoctorSignature string                  `json:"doctor_signature"`
+	PrevHash        string                  `json:"prev_hash"`
 }
 
-func NewBlock(index int, record medical.MedicalRecord, doctorSignature, prevHash string) Block {
+func NewBlock(index int, record medical.EncryptedRecord, doctorSignature, prevHash string) Block {
 	block := Block{
 		Index:           index,
 		Timestamp:       time.Now().Unix(),
@@ -40,7 +40,7 @@ func NewBlock(index int, record medical.MedicalRecord, doctorSignature, prevHash
 }
 
 func NewGenesisBlock() Block {
-	return NewBlock(0, medical.NewGenesisRecord(), "", "")
+	return NewBlock(0, medical.NewGenesisEncryptedRecord(), "", "")
 }
 
 func (b Block) CalculateHash() string {
