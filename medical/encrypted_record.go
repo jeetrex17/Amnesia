@@ -33,6 +33,8 @@ type EncryptedRecord struct {
 	Nonce             string             `json:"nonce"`
 	WrappedKeys       []WrappedKey       `json:"wrapped_keys"`
 	PendingRedaction  bool               `json:"pending_redaction"`
+	Redacted          bool               `json:"redacted"`
+	RedactedAt        int64              `json:"redacted_at,omitempty"`
 	RedactionRequest  *RedactionRequest  `json:"redaction_request,omitempty"`
 	RedactionApproval *RedactionApproval `json:"redaction_approval,omitempty"`
 }
@@ -103,6 +105,10 @@ func (r EncryptedRecord) IsGenesis() bool {
 	return r.RecordID == "GENESIS" && r.RecordType == "genesis"
 }
 
+func (r EncryptedRecord) IsRedacted() bool {
+	return r.Redacted
+}
+
 func (r EncryptedRecord) ValidateStored() error {
 	if r.IsGenesis() {
 		return nil
@@ -123,6 +129,33 @@ func (r EncryptedRecord) ValidateStored() error {
 	if r.CreatedAt <= 0 {
 		return fmt.Errorf("created_at must be set")
 	}
+
+	if err := r.validateRedactionMetadata(); err != nil {
+		return err
+	}
+
+	if r.Redacted {
+		if r.PendingRedaction {
+			return fmt.Errorf("redacted record cannot still be pending redaction")
+		}
+		if r.RedactedAt <= 0 {
+			return fmt.Errorf("redacted_at must be set for redacted records")
+		}
+		if strings.TrimSpace(r.Ciphertext) != "" {
+			return fmt.Errorf("redacted record must not retain ciphertext")
+		}
+		if strings.TrimSpace(r.Nonce) != "" {
+			return fmt.Errorf("redacted record must not retain nonce")
+		}
+		if len(r.WrappedKeys) != 0 {
+			return fmt.Errorf("redacted record must not retain wrapped keys")
+		}
+		return nil
+	}
+
+	if r.RedactedAt != 0 {
+		return fmt.Errorf("non-redacted record must not set redacted_at")
+	}
 	if strings.TrimSpace(r.Ciphertext) == "" {
 		return fmt.Errorf("ciphertext is required")
 	}
@@ -142,31 +175,6 @@ func (r EncryptedRecord) ValidateStored() error {
 			return fmt.Errorf("duplicate wrapped key for actor ID: %s", wrappedKey.ActorID)
 		}
 		seenActors[wrappedKey.ActorID] = struct{}{}
-	}
-
-	if !r.PendingRedaction {
-		if r.RedactionRequest != nil || r.RedactionApproval != nil {
-			return fmt.Errorf("redaction metadata requires pending_redaction to be true")
-		}
-		return nil
-	}
-	if r.RedactionRequest == nil || r.RedactionApproval == nil {
-		return fmt.Errorf("pending redaction requires both request and approval")
-	}
-	if err := r.RedactionRequest.Validate(); err != nil {
-		return fmt.Errorf("invalid redaction request: %w", err)
-	}
-	if err := r.RedactionApproval.Validate(); err != nil {
-		return fmt.Errorf("invalid redaction approval: %w", err)
-	}
-	if r.RedactionRequest.RecordID != r.RecordID {
-		return fmt.Errorf("redaction request record ID mismatch: %s", r.RedactionRequest.RecordID)
-	}
-	if r.RedactionApproval.RecordID != r.RecordID {
-		return fmt.Errorf("redaction approval record ID mismatch: %s", r.RedactionApproval.RecordID)
-	}
-	if r.RedactionRequest.PatientID != r.RedactionApproval.PatientID {
-		return fmt.Errorf("redaction patient mismatch between request and approval")
 	}
 
 	return nil
@@ -224,6 +232,35 @@ func (w WrappedKey) Validate() error {
 	}
 	if strings.TrimSpace(w.Nonce) == "" {
 		return fmt.Errorf("wrapped key nonce is required for %s", w.ActorID)
+	}
+
+	return nil
+}
+
+func (r EncryptedRecord) validateRedactionMetadata() error {
+	if r.RedactionRequest == nil && r.RedactionApproval == nil {
+		if r.PendingRedaction {
+			return fmt.Errorf("pending redaction requires both request and approval")
+		}
+		return nil
+	}
+	if r.RedactionRequest == nil || r.RedactionApproval == nil {
+		return fmt.Errorf("redaction metadata requires both request and approval")
+	}
+	if err := r.RedactionRequest.Validate(); err != nil {
+		return fmt.Errorf("invalid redaction request: %w", err)
+	}
+	if err := r.RedactionApproval.Validate(); err != nil {
+		return fmt.Errorf("invalid redaction approval: %w", err)
+	}
+	if r.RedactionRequest.RecordID != r.RecordID {
+		return fmt.Errorf("redaction request record ID mismatch: %s", r.RedactionRequest.RecordID)
+	}
+	if r.RedactionApproval.RecordID != r.RecordID {
+		return fmt.Errorf("redaction approval record ID mismatch: %s", r.RedactionApproval.RecordID)
+	}
+	if r.RedactionRequest.PatientID != r.RedactionApproval.PatientID {
+		return fmt.Errorf("redaction patient mismatch between request and approval")
 	}
 
 	return nil

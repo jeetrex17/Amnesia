@@ -161,6 +161,87 @@ func TestValidateChainRejectsTamperedRedactionRequest(t *testing.T) {
 	}
 }
 
+func TestRedactRecordRemovesEncryptedPayloadAndPreservesValidation(t *testing.T) {
+	chain := NewBlockchain()
+	store := newTestKeystore(t)
+	block := addSignedBlock(t, chain, store, medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Signed"))
+
+	request := medical.NewRedactionRequest(block.Record.RecordID, "P001", "patient requested deletion")
+	requestSignature, err := store.SignRedactionRequestAsPatient("P001", request)
+	if err != nil {
+		t.Fatalf("sign redaction request failed: %v", err)
+	}
+	request.Signature = requestSignature
+
+	approval := medical.NewRedactionApproval(block.Record.RecordID, "P001", "A001")
+	approvalSignature, err := store.SignRedactionApprovalAsAuthority("A001", approval)
+	if err != nil {
+		t.Fatalf("sign redaction approval failed: %v", err)
+	}
+	approval.Signature = approvalSignature
+
+	if err := chain.AuthorizeRedaction(block.Record.RecordID, request, approval); err != nil {
+		t.Fatalf("authorize redaction failed: %v", err)
+	}
+	if err := chain.RedactRecord(block.Record.RecordID); err != nil {
+		t.Fatalf("redact record failed: %v", err)
+	}
+
+	redacted := chain.Blocks[1].Record
+	if !redacted.IsRedacted() {
+		t.Fatalf("expected record to be marked redacted")
+	}
+	if redacted.PendingRedaction {
+		t.Fatalf("expected pending_redaction to be false after execution")
+	}
+	if redacted.Ciphertext != "" || redacted.Nonce != "" {
+		t.Fatalf("expected encrypted payload to be cleared")
+	}
+	if len(redacted.WrappedKeys) != 0 {
+		t.Fatalf("expected wrapped keys to be cleared")
+	}
+	if redacted.RedactedAt <= 0 {
+		t.Fatalf("expected redacted_at to be set")
+	}
+	if err := chain.ValidateChain(store); err != nil {
+		t.Fatalf("expected valid chain after redaction, got: %v", err)
+	}
+}
+
+func TestValidateChainRejectsRedactedRecordWithCiphertext(t *testing.T) {
+	chain := NewBlockchain()
+	store := newTestKeystore(t)
+	block := addSignedBlock(t, chain, store, medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Signed"))
+
+	request := medical.NewRedactionRequest(block.Record.RecordID, "P001", "patient requested deletion")
+	requestSignature, err := store.SignRedactionRequestAsPatient("P001", request)
+	if err != nil {
+		t.Fatalf("sign redaction request failed: %v", err)
+	}
+	request.Signature = requestSignature
+
+	approval := medical.NewRedactionApproval(block.Record.RecordID, "P001", "A001")
+	approvalSignature, err := store.SignRedactionApprovalAsAuthority("A001", approval)
+	if err != nil {
+		t.Fatalf("sign redaction approval failed: %v", err)
+	}
+	approval.Signature = approvalSignature
+
+	if err := chain.AuthorizeRedaction(block.Record.RecordID, request, approval); err != nil {
+		t.Fatalf("authorize redaction failed: %v", err)
+	}
+	if err := chain.RedactRecord(block.Record.RecordID); err != nil {
+		t.Fatalf("redact record failed: %v", err)
+	}
+
+	chain.Blocks[1].Record.Ciphertext = "should-not-be-here"
+	chain.Blocks[1].Hash = chain.Blocks[1].CalculateHash()
+
+	if err := chain.ValidateChain(store); err == nil {
+		t.Fatalf("expected redacted record with ciphertext to be rejected")
+	}
+}
+
 func newTestKeystore(t *testing.T) *auth.Keystore {
 	t.Helper()
 

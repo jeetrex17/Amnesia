@@ -49,6 +49,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runViewRecord(args[1:], stdout, stderr)
 	case "authorize-redaction":
 		return runAuthorizeRedaction(args[1:], stdout, stderr)
+	case "redact-record":
+		return runRedactRecord(args[1:], stdout, stderr)
 	case "verify":
 		return runVerify(stdout)
 	case "help", "-h", "--help":
@@ -385,6 +387,9 @@ func runViewRecord(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if record.IsRedacted() {
+		return fmt.Errorf("record is redacted: %s", recordID)
+	}
 	payload, err := store.DecryptRecordForActor(record, actorID)
 	if err != nil {
 		return err
@@ -490,6 +495,9 @@ func runAuthorizeRedaction(args []string, stdout, stderr io.Writer) error {
 	if record.IsGenesis() {
 		return fmt.Errorf("cannot authorize redaction for genesis record")
 	}
+	if record.IsRedacted() {
+		return fmt.Errorf("record already redacted: %s", recordID)
+	}
 	if record.PendingRedaction || record.RedactionRequest != nil || record.RedactionApproval != nil {
 		return fmt.Errorf("redaction authorization already exists for record ID: %s", recordID)
 	}
@@ -543,6 +551,75 @@ func runAuthorizeRedaction(args []string, stdout, stderr io.Writer) error {
 	}
 
 	_, err = fmt.Fprintf(stdout, "authorized redaction for record %s by patient %s and authority %s\n", recordID, patientID, authorityID)
+	return err
+}
+
+func runRedactRecord(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("redact-record", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	recordIDLong := fs.String("record-id", "", "record identifier")
+	recordIDShort := fs.String("i", "", "record identifier")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	recordID, err := resolveFlagValue("record-id", *recordIDLong, "i", *recordIDShort)
+	if err != nil {
+		return err
+	}
+	if recordID == "" {
+		return fmt.Errorf("record-id is required")
+	}
+
+	chain, err := loadExistingChain()
+	if err != nil {
+		return err
+	}
+	registry, err := loadActorRegistry()
+	if err != nil {
+		return err
+	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
+
+	record, err := chain.RecordByID(recordID)
+	if err != nil {
+		return err
+	}
+	if record.IsGenesis() {
+		return fmt.Errorf("cannot redact genesis record")
+	}
+	if record.IsRedacted() {
+		return fmt.Errorf("record already redacted: %s", recordID)
+	}
+	if !record.PendingRedaction || record.RedactionRequest == nil || record.RedactionApproval == nil {
+		return fmt.Errorf("record is not authorized for redaction: %s", recordID)
+	}
+
+	patient, ok := registry.ActorByID(record.RedactionRequest.PatientID)
+	if !ok || patient.Role != actors.RolePatient {
+		return fmt.Errorf("redaction patient no longer exists: %s", record.RedactionRequest.PatientID)
+	}
+	authority, ok := registry.ActorByID(record.RedactionApproval.AuthorityID)
+	if !ok || authority.Role != actors.RoleAuthority {
+		return fmt.Errorf("redaction authority no longer exists: %s", record.RedactionApproval.AuthorityID)
+	}
+
+	if err := chain.RedactRecord(recordID); err != nil {
+		return err
+	}
+	if err := chain.ValidateChain(store); err != nil {
+		return fmt.Errorf("post-redaction validation failed: %w", err)
+	}
+	if err := storage.SaveChain(chainPath, chain); err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintf(stdout, "redacted record %s\n", recordID)
 	return err
 }
 
@@ -682,6 +759,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  authorize-redaction [--record-id|-i] <record-id> [--patient|-p] <patient-id> [--authority|-a] <authority-id> [--reason|-r] <reason>")
 	fmt.Fprintln(w, "      Attach signed patient request and authority approval metadata to a record.")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  redact-record [--record-id|-i] <record-id>")
+	fmt.Fprintln(w, "      Execute a full-record redaction for an already-authorized record.")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  verify")
 	fmt.Fprintln(w, "      Recalculate hashes and validate the stored encrypted chain plus doctor, patient, and authority signatures.")
 	fmt.Fprintln(w)
@@ -709,5 +789,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `  amnesia add-record -p P007 -d D001 -r diagnosis -t "blood cancer" -c "3 months left"`)
 	fmt.Fprintln(w, `  amnesia view-record -i R001 -a D001`)
 	fmt.Fprintln(w, `  amnesia authorize-redaction -i R001 -p P007 -a A001 -r "patient requests deletion"`)
+	fmt.Fprintln(w, `  amnesia redact-record -i R001`)
 	fmt.Fprintln(w, `  amnesia add-actor -r doctor -n "Dr. Kapoor"`)
 }

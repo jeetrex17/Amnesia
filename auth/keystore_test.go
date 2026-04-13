@@ -148,6 +148,28 @@ func TestDecryptRecordRejectsUnrelatedOrInactiveActor(t *testing.T) {
 	}
 }
 
+func TestDecryptRecordRejectsRedactedRecord(t *testing.T) {
+	store, err := NewDemoKeystore(actors.NewDemoRegistry())
+	if err != nil {
+		t.Fatalf("create keystore failed: %v", err)
+	}
+
+	record := medical.NewRecordWithID("R001", "P001", "D001", "visit_note", "Visit Note", "content")
+	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{{ID: "A001", Role: actors.RoleAuthority, Active: true}})
+	if err != nil {
+		t.Fatalf("encrypt record failed: %v", err)
+	}
+	encryptedRecord.Redacted = true
+	encryptedRecord.RedactedAt = 1
+	encryptedRecord.Ciphertext = ""
+	encryptedRecord.Nonce = ""
+	encryptedRecord.WrappedKeys = nil
+
+	if _, err := store.DecryptRecordForActor(encryptedRecord, "D001"); err == nil {
+		t.Fatalf("expected redacted record decryption to fail")
+	}
+}
+
 func TestSignAndVerifyRedactionRequest(t *testing.T) {
 	store, err := NewDemoKeystore(actors.NewDemoRegistry())
 	if err != nil {

@@ -84,6 +84,10 @@ func (k *Keystore) EncryptRecord(record medical.MedicalRecord, authorities []act
 }
 
 func (k *Keystore) DecryptRecordForActor(record medical.EncryptedRecord, actorID string) (medical.RecordPayload, error) {
+	if record.IsRedacted() {
+		return medical.RecordPayload{}, fmt.Errorf("record is redacted: %s", record.RecordID)
+	}
+
 	entry, err := k.EntryForActiveActor(actorID)
 	if err != nil {
 		return medical.RecordPayload{}, err

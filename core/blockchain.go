@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/auth"
@@ -114,6 +115,36 @@ func (bc *Blockchain) AuthorizeRedaction(recordID string, request medical.Redact
 	return fmt.Errorf("record not found: %s", recordID)
 }
 
+func (bc *Blockchain) RedactRecord(recordID string) error {
+	for i := range bc.Blocks {
+		if bc.Blocks[i].Record.RecordID != recordID {
+			continue
+		}
+
+		record := &bc.Blocks[i].Record
+		if record.IsGenesis() {
+			return fmt.Errorf("cannot redact genesis record")
+		}
+		if record.IsRedacted() {
+			return fmt.Errorf("record already redacted: %s", recordID)
+		}
+		if !record.PendingRedaction || record.RedactionRequest == nil || record.RedactionApproval == nil {
+			return fmt.Errorf("record is not authorized for redaction: %s", recordID)
+		}
+
+		record.Redacted = true
+		record.RedactedAt = time.Now().Unix()
+		record.PendingRedaction = false
+		record.Ciphertext = ""
+		record.Nonce = ""
+		record.WrappedKeys = nil
+		bc.rehashFrom(i)
+		return nil
+	}
+
+	return fmt.Errorf("record not found: %s", recordID)
+}
+
 func (bc *Blockchain) ValidateIntegrity() error {
 	if len(bc.Blocks) == 0 {
 		return fmt.Errorf("blockchain is empty")
@@ -173,10 +204,12 @@ func (bc *Blockchain) ValidateChain(store *auth.Keystore) error {
 
 	for i := 1; i < len(bc.Blocks); i++ {
 		curr := bc.Blocks[i]
-		if err := store.VerifyDoctorRecordSignature(curr.Record, curr.DoctorSignature); err != nil {
-			return fmt.Errorf("invalid doctor signature at block %d: %w", i, err)
+		if !curr.Record.IsRedacted() {
+			if err := store.VerifyDoctorRecordSignature(curr.Record, curr.DoctorSignature); err != nil {
+				return fmt.Errorf("invalid doctor signature at block %d: %w", i, err)
+			}
 		}
-		if curr.Record.PendingRedaction {
+		if curr.Record.RedactionRequest != nil || curr.Record.RedactionApproval != nil {
 			if err := store.VerifyRedactionRequestSignature(*curr.Record.RedactionRequest); err != nil {
 				return fmt.Errorf("invalid redaction request signature at block %d: %w", i, err)
 			}
@@ -184,20 +217,22 @@ func (bc *Blockchain) ValidateChain(store *auth.Keystore) error {
 				return fmt.Errorf("invalid redaction approval signature at block %d: %w", i, err)
 			}
 
-			patientWrappedKey, err := curr.Record.WrappedKeyForActor(curr.Record.RedactionRequest.PatientID)
-			if err != nil {
-				return fmt.Errorf("missing patient wrapped key at block %d: %w", i, err)
-			}
-			if patientWrappedKey.ActorRole != actors.RolePatient {
-				return fmt.Errorf("patient wrapped key role mismatch at block %d", i)
-			}
+			if !curr.Record.IsRedacted() {
+				patientWrappedKey, err := curr.Record.WrappedKeyForActor(curr.Record.RedactionRequest.PatientID)
+				if err != nil {
+					return fmt.Errorf("missing patient wrapped key at block %d: %w", i, err)
+				}
+				if patientWrappedKey.ActorRole != actors.RolePatient {
+					return fmt.Errorf("patient wrapped key role mismatch at block %d", i)
+				}
 
-			authorityWrappedKey, err := curr.Record.WrappedKeyForActor(curr.Record.RedactionApproval.AuthorityID)
-			if err != nil {
-				return fmt.Errorf("missing authority wrapped key at block %d: %w", i, err)
-			}
-			if authorityWrappedKey.ActorRole != actors.RoleAuthority {
-				return fmt.Errorf("authority wrapped key role mismatch at block %d", i)
+				authorityWrappedKey, err := curr.Record.WrappedKeyForActor(curr.Record.RedactionApproval.AuthorityID)
+				if err != nil {
+					return fmt.Errorf("missing authority wrapped key at block %d: %w", i, err)
+				}
+				if authorityWrappedKey.ActorRole != actors.RoleAuthority {
+					return fmt.Errorf("authority wrapped key role mismatch at block %d", i)
+				}
 			}
 		}
 	}
