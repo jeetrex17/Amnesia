@@ -11,6 +11,7 @@ import (
 
 	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/auth"
+	"github.com/jeetraj/amnesia/chameleon"
 	"github.com/jeetraj/amnesia/core"
 	"github.com/jeetraj/amnesia/medical"
 	"github.com/jeetraj/amnesia/storage"
@@ -19,6 +20,7 @@ import (
 const chainPath = "chain.json"
 const actorsPath = "actors.json"
 const keystorePath = "keystore.json"
+const chameleonPath = "chameleon.json"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -63,7 +65,18 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func runInit(stdout io.Writer) error {
-	chain := core.NewBlockchain()
+	chameleonStore, err := chameleon.Generate()
+	if err != nil {
+		return err
+	}
+	publicKey, err := chameleonStore.Public()
+	if err != nil {
+		return err
+	}
+	chain, err := core.NewBlockchain(publicKey)
+	if err != nil {
+		return err
+	}
 	registry := actors.NewDemoRegistry()
 	store, err := auth.NewDemoKeystore(registry)
 	if err != nil {
@@ -79,8 +92,11 @@ func runInit(stdout io.Writer) error {
 	if err := storage.SaveKeystore(keystorePath, store); err != nil {
 		return err
 	}
+	if err := storage.SaveChameleonStore(chameleonPath, chameleonStore); err != nil {
+		return err
+	}
 
-	_, err = fmt.Fprintf(stdout, "initialized blockchain at %s, actors at %s, and keystore at %s\n", chainPath, actorsPath, keystorePath)
+	_, err = fmt.Fprintf(stdout, "initialized blockchain at %s, actors at %s, keystore at %s, and chameleon keys at %s\n", chainPath, actorsPath, keystorePath, chameleonPath)
 	return err
 }
 
@@ -193,6 +209,14 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	chameleonStore, err := loadChameleonStore()
+	if err != nil {
+		return err
+	}
+	chameleonPublicKey, err := chameleonStore.Public()
+	if err != nil {
+		return err
+	}
 
 	patient, ok := registry.ActorByID(patientID)
 	if !ok || patient.Role != actors.RolePatient {
@@ -226,11 +250,11 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	block, err := chain.AddBlock(encryptedRecord, signature)
+	block, err := chain.AddBlock(encryptedRecord, signature, chameleonPublicKey)
 	if err != nil {
 		return err
 	}
-	if err := chain.ValidateChain(store); err != nil {
+	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
 		return fmt.Errorf("post-add validation failed: %w", err)
 	}
 
@@ -471,6 +495,14 @@ func runAuthorizeRedaction(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	chameleonStore, err := loadChameleonStore()
+	if err != nil {
+		return err
+	}
+	chameleonPublicKey, err := chameleonStore.Public()
+	if err != nil {
+		return err
+	}
 
 	patient, ok := registry.ActorByID(patientID)
 	if !ok || patient.Role != actors.RolePatient {
@@ -540,10 +572,10 @@ func runAuthorizeRedaction(args []string, stdout, stderr io.Writer) error {
 	}
 	approval.Signature = approvalSignature
 
-	if err := chain.AuthorizeRedaction(recordID, request, approval); err != nil {
+	if err := chain.AuthorizeRedaction(recordID, request, approval, chameleonStore); err != nil {
 		return err
 	}
-	if err := chain.ValidateChain(store); err != nil {
+	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
 		return fmt.Errorf("post-authorization validation failed: %w", err)
 	}
 	if err := storage.SaveChain(chainPath, chain); err != nil {
@@ -585,6 +617,14 @@ func runRedactRecord(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	chameleonStore, err := loadChameleonStore()
+	if err != nil {
+		return err
+	}
+	chameleonPublicKey, err := chameleonStore.Public()
+	if err != nil {
+		return err
+	}
 
 	record, err := chain.RecordByID(recordID)
 	if err != nil {
@@ -609,10 +649,10 @@ func runRedactRecord(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("redaction authority no longer exists: %s", record.RedactionApproval.AuthorityID)
 	}
 
-	if err := chain.RedactRecord(recordID); err != nil {
+	if err := chain.RedactRecord(recordID, chameleonStore); err != nil {
 		return err
 	}
-	if err := chain.ValidateChain(store); err != nil {
+	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
 		return fmt.Errorf("post-redaction validation failed: %w", err)
 	}
 	if err := storage.SaveChain(chainPath, chain); err != nil {
@@ -632,8 +672,16 @@ func runVerify(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	chameleonStore, err := loadChameleonStore()
+	if err != nil {
+		return err
+	}
+	chameleonPublicKey, err := chameleonStore.Public()
+	if err != nil {
+		return err
+	}
 
-	if err := chain.ValidateChain(store); err != nil {
+	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
 		return fmt.Errorf("chain validation failed: %w", err)
 	}
 
@@ -642,7 +690,15 @@ func runVerify(stdout io.Writer) error {
 }
 
 func loadExistingChain() (*core.Blockchain, error) {
-	chain, err := storage.LoadChain(chainPath)
+	chameleonStore, err := loadChameleonStore()
+	if err != nil {
+		return nil, err
+	}
+	publicKey, err := chameleonStore.Public()
+	if err != nil {
+		return nil, err
+	}
+	chain, err := storage.LoadChain(chainPath, publicKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%s not found; run `amnesia init` first", chainPath)
@@ -670,6 +726,18 @@ func loadKeystore() (*auth.Keystore, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%s not found; run `amnesia init` first", keystorePath)
+		}
+		return nil, err
+	}
+
+	return store, nil
+}
+
+func loadChameleonStore() (*chameleon.Store, error) {
+	store, err := storage.LoadChameleonStore(chameleonPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%s not found; run `amnesia init` first", chameleonPath)
 		}
 		return nil, err
 	}
@@ -734,7 +802,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
-	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors plus keys.")
+	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors, keys, and chameleon-link material.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  add-actor [--role|-r] <patient|doctor|authority> [--name|-n] <name>")
 	fmt.Fprintln(w, "      Add a new active actor and generate a matching keypair.")
@@ -763,7 +831,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "      Execute a full-record redaction for an already-authorized record.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  verify")
-	fmt.Fprintln(w, "      Recalculate hashes and validate the stored encrypted chain plus doctor, patient, and authority signatures.")
+	fmt.Fprintln(w, "      Validate encrypted records, chameleon links, and doctor/patient/authority signatures.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Supported medical record types:")
 	fmt.Fprintln(w, "  diagnosis           A diagnosis or confirmed condition")
@@ -783,7 +851,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  Patients   : P001, P002, P007")
 	fmt.Fprintln(w, "  Doctors    : D001, D002")
 	fmt.Fprintln(w, "  Authorities: A001")
-	fmt.Fprintln(w, "  Keys       : stored in keystore.json")
+	fmt.Fprintln(w, "  Actor keys : stored in keystore.json")
+	fmt.Fprintln(w, "  Link keys  : stored in chameleon.json")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Example:")
 	fmt.Fprintln(w, `  amnesia add-record -p P007 -d D001 -r diagnosis -t "blood cancer" -c "3 months left"`)

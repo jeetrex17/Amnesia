@@ -7,6 +7,7 @@ import (
 
 	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/auth"
+	"github.com/jeetraj/amnesia/chameleon"
 	"github.com/jeetraj/amnesia/medical"
 )
 
@@ -14,13 +15,18 @@ type Blockchain struct {
 	Blocks []Block `json:"blocks"`
 }
 
-func NewBlockchain() *Blockchain {
-	return &Blockchain{
-		Blocks: []Block{NewGenesisBlock()},
+func NewBlockchain(publicKey *chameleon.PublicKey) (*Blockchain, error) {
+	genesis, err := NewGenesisBlock(publicKey)
+	if err != nil {
+		return nil, err
 	}
+
+	return &Blockchain{
+		Blocks: []Block{genesis},
+	}, nil
 }
 
-func (bc *Blockchain) AddBlock(record medical.EncryptedRecord, doctorSignature string) (Block, error) {
+func (bc *Blockchain) AddBlock(record medical.EncryptedRecord, doctorSignature string, publicKey *chameleon.PublicKey) (Block, error) {
 	if err := record.ValidateStored(); err != nil {
 		return Block{}, err
 	}
@@ -32,7 +38,10 @@ func (bc *Blockchain) AddBlock(record medical.EncryptedRecord, doctorSignature s
 	}
 
 	prev := bc.Blocks[len(bc.Blocks)-1]
-	block := NewBlock(prev.Index+1, record, doctorSignature, prev.Hash)
+	block, err := NewBlock(prev.Index+1, record, doctorSignature, prev.LinkHash, publicKey)
+	if err != nil {
+		return Block{}, err
+	}
 	bc.Blocks = append(bc.Blocks, block)
 	return block, nil
 }
@@ -77,12 +86,15 @@ func (bc *Blockchain) NextRecordID() (string, error) {
 	return fmt.Sprintf("R%03d", maxID+1), nil
 }
 
-func (bc *Blockchain) AuthorizeRedaction(recordID string, request medical.RedactionRequest, approval medical.RedactionApproval) error {
+func (bc *Blockchain) AuthorizeRedaction(recordID string, request medical.RedactionRequest, approval medical.RedactionApproval, chameleonStore *chameleon.Store) error {
 	if err := request.Validate(); err != nil {
 		return err
 	}
 	if err := approval.Validate(); err != nil {
 		return err
+	}
+	if chameleonStore == nil {
+		return fmt.Errorf("chameleon store is required")
 	}
 
 	for i := range bc.Blocks {
@@ -105,23 +117,28 @@ func (bc *Blockchain) AuthorizeRedaction(recordID string, request medical.Redact
 			return fmt.Errorf("redaction patient mismatch between request and approval")
 		}
 
-		bc.Blocks[i].Record.PendingRedaction = true
-		bc.Blocks[i].Record.RedactionRequest = &request
-		bc.Blocks[i].Record.RedactionApproval = &approval
-		bc.rehashFrom(i)
-		return nil
+		return bc.mutateBlockRecord(i, chameleonStore, func(record *medical.EncryptedRecord) error {
+			record.PendingRedaction = true
+			record.RedactionRequest = &request
+			record.RedactionApproval = &approval
+			return nil
+		})
 	}
 
 	return fmt.Errorf("record not found: %s", recordID)
 }
 
-func (bc *Blockchain) RedactRecord(recordID string) error {
+func (bc *Blockchain) RedactRecord(recordID string, chameleonStore *chameleon.Store) error {
+	if chameleonStore == nil {
+		return fmt.Errorf("chameleon store is required")
+	}
+
 	for i := range bc.Blocks {
 		if bc.Blocks[i].Record.RecordID != recordID {
 			continue
 		}
 
-		record := &bc.Blocks[i].Record
+		record := bc.Blocks[i].Record
 		if record.IsGenesis() {
 			return fmt.Errorf("cannot redact genesis record")
 		}
@@ -132,20 +149,24 @@ func (bc *Blockchain) RedactRecord(recordID string) error {
 			return fmt.Errorf("record is not authorized for redaction: %s", recordID)
 		}
 
-		record.Redacted = true
-		record.RedactedAt = time.Now().Unix()
-		record.PendingRedaction = false
-		record.Ciphertext = ""
-		record.Nonce = ""
-		record.WrappedKeys = nil
-		bc.rehashFrom(i)
-		return nil
+		return bc.mutateBlockRecord(i, chameleonStore, func(record *medical.EncryptedRecord) error {
+			record.Redacted = true
+			record.RedactedAt = time.Now().Unix()
+			record.PendingRedaction = false
+			record.Ciphertext = ""
+			record.Nonce = ""
+			record.WrappedKeys = nil
+			return nil
+		})
 	}
 
 	return fmt.Errorf("record not found: %s", recordID)
 }
 
-func (bc *Blockchain) ValidateIntegrity() error {
+func (bc *Blockchain) ValidateIntegrity(publicKey *chameleon.PublicKey) error {
+	if publicKey == nil {
+		return fmt.Errorf("chameleon public key is required for integrity validation")
+	}
 	if len(bc.Blocks) == 0 {
 		return fmt.Errorf("blockchain is empty")
 	}
@@ -154,11 +175,14 @@ func (bc *Blockchain) ValidateIntegrity() error {
 	if genesis.Index != 0 {
 		return fmt.Errorf("invalid genesis index: got %d", genesis.Index)
 	}
-	if genesis.PrevHash != "" {
-		return fmt.Errorf("invalid genesis prev hash: expected empty")
+	if genesis.PrevLinkHash != "" {
+		return fmt.Errorf("invalid genesis previous link hash: expected empty")
 	}
-	if genesis.Hash != genesis.CalculateHash() {
-		return fmt.Errorf("invalid genesis hash")
+	if genesis.ContentHash != genesis.CalculateContentHash() {
+		return fmt.Errorf("invalid genesis content hash")
+	}
+	if err := genesis.VerifyLink(publicKey); err != nil {
+		return fmt.Errorf("invalid genesis link hash: %w", err)
 	}
 	if !genesis.Record.IsGenesis() {
 		return fmt.Errorf("invalid genesis record")
@@ -173,11 +197,14 @@ func (bc *Blockchain) ValidateIntegrity() error {
 		if curr.Index != prev.Index+1 {
 			return fmt.Errorf("invalid index at block %d", i)
 		}
-		if curr.PrevHash != prev.Hash {
+		if curr.PrevLinkHash != prev.LinkHash {
 			return fmt.Errorf("broken link at block %d", i)
 		}
-		if curr.Hash != curr.CalculateHash() {
-			return fmt.Errorf("invalid hash at block %d", i)
+		if curr.ContentHash != curr.CalculateContentHash() {
+			return fmt.Errorf("invalid content hash at block %d", i)
+		}
+		if err := curr.VerifyLink(publicKey); err != nil {
+			return fmt.Errorf("invalid link hash at block %d: %w", i, err)
 		}
 		if strings.TrimSpace(curr.DoctorSignature) == "" {
 			return fmt.Errorf("missing doctor signature at block %d", i)
@@ -194,8 +221,8 @@ func (bc *Blockchain) ValidateIntegrity() error {
 	return nil
 }
 
-func (bc *Blockchain) ValidateChain(store *auth.Keystore) error {
-	if err := bc.ValidateIntegrity(); err != nil {
+func (bc *Blockchain) ValidateChain(store *auth.Keystore, publicKey *chameleon.PublicKey) error {
+	if err := bc.ValidateIntegrity(publicKey); err != nil {
 		return err
 	}
 	if store == nil {
@@ -240,13 +267,43 @@ func (bc *Blockchain) ValidateChain(store *auth.Keystore) error {
 	return nil
 }
 
-func (bc *Blockchain) rehashFrom(index int) {
-	for i := index; i < len(bc.Blocks); i++ {
-		if i == 0 {
-			bc.Blocks[i].PrevHash = ""
-		} else {
-			bc.Blocks[i].PrevHash = bc.Blocks[i-1].Hash
-		}
-		bc.Blocks[i].Hash = bc.Blocks[i].CalculateHash()
+func (bc *Blockchain) mutateBlockRecord(index int, chameleonStore *chameleon.Store, mutate func(record *medical.EncryptedRecord) error) error {
+	if index <= 0 || index >= len(bc.Blocks) {
+		return fmt.Errorf("block index out of range: %d", index)
 	}
+
+	block := &bc.Blocks[index]
+	oldMessage, err := block.LinkMessage()
+	if err != nil {
+		return err
+	}
+	oldRandomness := block.LinkRandomness
+	oldLinkHash := block.LinkHash
+
+	if err := mutate(&block.Record); err != nil {
+		return err
+	}
+
+	block.UpdateContentHash()
+	newMessage, err := block.LinkMessage()
+	if err != nil {
+		return err
+	}
+
+	newRandomness, err := chameleonStore.ForgeCollision(oldMessage, oldRandomness, newMessage)
+	if err != nil {
+		return err
+	}
+
+	publicKey, err := chameleonStore.Public()
+	if err != nil {
+		return err
+	}
+	if err := publicKey.Verify(newMessage, newRandomness, oldLinkHash); err != nil {
+		return fmt.Errorf("preserve link hash after mutation: %w", err)
+	}
+
+	block.LinkRandomness = newRandomness
+	block.LinkHash = oldLinkHash
+	return nil
 }

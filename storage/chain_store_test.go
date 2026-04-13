@@ -9,12 +9,25 @@ import (
 
 	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/auth"
+	"github.com/jeetraj/amnesia/chameleon"
 	"github.com/jeetraj/amnesia/core"
 	"github.com/jeetraj/amnesia/medical"
 )
 
 func TestSaveAndLoadChainRoundTrip(t *testing.T) {
-	chain := core.NewBlockchain()
+	chameleonStore, err := chameleon.Generate()
+	if err != nil {
+		t.Fatalf("generate chameleon store failed: %v", err)
+	}
+	publicKey, err := chameleonStore.Public()
+	if err != nil {
+		t.Fatalf("load chameleon public key failed: %v", err)
+	}
+
+	chain, err := core.NewBlockchain(publicKey)
+	if err != nil {
+		t.Fatalf("create blockchain failed: %v", err)
+	}
 	store, err := auth.NewDemoKeystore(actors.NewDemoRegistry())
 	if err != nil {
 		t.Fatalf("create keystore failed: %v", err)
@@ -33,7 +46,7 @@ func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 		t.Fatalf("sign record failed: %v", err)
 	}
 
-	if _, err := chain.AddBlock(encryptedRecord, signature); err != nil {
+	if _, err := chain.AddBlock(encryptedRecord, signature, publicKey); err != nil {
 		t.Fatalf("add block failed: %v", err)
 	}
 
@@ -42,7 +55,7 @@ func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 		t.Fatalf("save failed: %v", err)
 	}
 
-	loaded, err := LoadChain(path)
+	loaded, err := LoadChain(path, publicKey)
 	if err != nil {
 		t.Fatalf("load failed: %v", err)
 	}
@@ -57,10 +70,25 @@ func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 	if loaded.Blocks[1].Record.Ciphertext == "" {
 		t.Fatalf("expected encrypted ciphertext to be stored")
 	}
+	if loaded.Blocks[1].LinkHash == "" {
+		t.Fatalf("expected link hash to be stored")
+	}
 }
 
 func TestLoadChainRejectsTamperedFile(t *testing.T) {
-	chain := core.NewBlockchain()
+	chameleonStore, err := chameleon.Generate()
+	if err != nil {
+		t.Fatalf("generate chameleon store failed: %v", err)
+	}
+	publicKey, err := chameleonStore.Public()
+	if err != nil {
+		t.Fatalf("load chameleon public key failed: %v", err)
+	}
+
+	chain, err := core.NewBlockchain(publicKey)
+	if err != nil {
+		t.Fatalf("create blockchain failed: %v", err)
+	}
 	store, err := auth.NewDemoKeystore(actors.NewDemoRegistry())
 	if err != nil {
 		t.Fatalf("create keystore failed: %v", err)
@@ -79,7 +107,7 @@ func TestLoadChainRejectsTamperedFile(t *testing.T) {
 		t.Fatalf("sign record failed: %v", err)
 	}
 
-	if _, err := chain.AddBlock(encryptedRecord, signature); err != nil {
+	if _, err := chain.AddBlock(encryptedRecord, signature, publicKey); err != nil {
 		t.Fatalf("add block failed: %v", err)
 	}
 
@@ -98,7 +126,7 @@ func TestLoadChainRejectsTamperedFile(t *testing.T) {
 		t.Fatalf("write failed: %v", err)
 	}
 
-	if _, err := LoadChain(path); err == nil {
+	if _, err := LoadChain(path, publicKey); err == nil {
 		t.Fatalf("expected tampered chain to fail validation")
 	}
 }
