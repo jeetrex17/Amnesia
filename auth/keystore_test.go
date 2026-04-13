@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/medical"
+	"github.com/jeetraj/amnesia/zk"
 )
 
 func TestAddActorCreatesActiveKeyEntry(t *testing.T) {
@@ -49,7 +51,7 @@ func TestSignRecordAsDoctorRejectsInactiveDoctor(t *testing.T) {
 		t.Fatalf("create keystore failed: %v", err)
 	}
 	record := medical.NewRecordWithID("R001", "P001", "D001", "visit_note", "Visit Note", "content")
-	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{{ID: "A001", Role: actors.RoleAuthority, Active: true}})
+	encryptedRecord, err := encryptRecordForTest(t, store, record)
 	if err != nil {
 		t.Fatalf("encrypt record failed: %v", err)
 	}
@@ -68,7 +70,7 @@ func TestVerifyDoctorSignatureStillWorksForInactiveDoctor(t *testing.T) {
 	}
 
 	record := medical.NewRecordWithID("R001", "P001", "D001", "visit_note", "Visit Note", "content")
-	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{{ID: "A001", Role: actors.RoleAuthority, Active: true}})
+	encryptedRecord, err := encryptRecordForTest(t, store, record)
 	if err != nil {
 		t.Fatalf("encrypt record failed: %v", err)
 	}
@@ -91,7 +93,7 @@ func TestEncryptRecordAndDecryptForAllowedActors(t *testing.T) {
 	}
 
 	record := medical.NewRecordWithID("R001", "P001", "D001", "diagnosis", "Diagnosis", "Patient content")
-	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{{ID: "A001", Role: actors.RoleAuthority, Active: true}})
+	encryptedRecord, err := encryptRecordForTest(t, store, record)
 	if err != nil {
 		t.Fatalf("encrypt record failed: %v", err)
 	}
@@ -131,7 +133,7 @@ func TestDecryptRecordRejectsUnrelatedOrInactiveActor(t *testing.T) {
 		t.Fatalf("add unrelated doctor failed: %v", err)
 	}
 	record := medical.NewRecordWithID("R001", "P001", "D001", "visit_note", "Visit Note", "content")
-	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{{ID: "A001", Role: actors.RoleAuthority, Active: true}})
+	encryptedRecord, err := encryptRecordForTest(t, store, record)
 	if err != nil {
 		t.Fatalf("encrypt record failed: %v", err)
 	}
@@ -155,7 +157,7 @@ func TestDecryptRecordRejectsRedactedRecord(t *testing.T) {
 	}
 
 	record := medical.NewRecordWithID("R001", "P001", "D001", "visit_note", "Visit Note", "content")
-	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{{ID: "A001", Role: actors.RoleAuthority, Active: true}})
+	encryptedRecord, err := encryptRecordForTest(t, store, record)
 	if err != nil {
 		t.Fatalf("encrypt record failed: %v", err)
 	}
@@ -204,4 +206,50 @@ func TestSignAndVerifyRedactionApproval(t *testing.T) {
 	if err := store.VerifyRedactionApprovalSignature(approval); err != nil {
 		t.Fatalf("verify redaction approval failed: %v", err)
 	}
+}
+
+func TestRecordCommitmentSaltRoundTrip(t *testing.T) {
+	store, err := NewDemoKeystore(actors.NewDemoRegistry())
+	if err != nil {
+		t.Fatalf("create keystore failed: %v", err)
+	}
+
+	salt, err := zk.GeneratePatientCommitmentSalt()
+	if err != nil {
+		t.Fatalf("generate patient commitment salt failed: %v", err)
+	}
+	if err := store.SetRecordCommitmentSalt("R001", salt); err != nil {
+		t.Fatalf("set patient commitment salt failed: %v", err)
+	}
+
+	loaded, err := store.RecordCommitmentSalt("R001")
+	if err != nil {
+		t.Fatalf("load patient commitment salt failed: %v", err)
+	}
+	if !bytes.Equal(loaded, salt) {
+		t.Fatalf("loaded patient commitment salt mismatch")
+	}
+
+	store.DeleteRecordSecret("R001")
+	if _, err := store.RecordCommitmentSalt("R001"); err == nil {
+		t.Fatalf("expected deleted record secret lookup to fail")
+	}
+}
+
+func encryptRecordForTest(t *testing.T, store *Keystore, record medical.MedicalRecord) (medical.EncryptedRecord, error) {
+	t.Helper()
+
+	salt, err := zk.GeneratePatientCommitmentSalt()
+	if err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+	if err := store.SetRecordCommitmentSalt(record.RecordID, salt); err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+	patientCommitment, err := zk.ComputePatientCommitment(record.RecordID, record.PatientID, salt)
+	if err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+
+	return store.EncryptRecord(record, patientCommitment, []actors.ActorInfo{{ID: "A001", Role: actors.RoleAuthority, Active: true}})
 }

@@ -15,6 +15,10 @@ type Blockchain struct {
 	Blocks []Block `json:"blocks"`
 }
 
+type RedactionProofVerifier interface {
+	VerifyRecordProof(record medical.EncryptedRecord) error
+}
+
 func NewBlockchain(publicKey *chameleon.PublicKey) (*Blockchain, error) {
 	genesis, err := NewGenesisBlock(publicKey)
 	if err != nil {
@@ -128,9 +132,12 @@ func (bc *Blockchain) AuthorizeRedaction(recordID string, request medical.Redact
 	return fmt.Errorf("record not found: %s", recordID)
 }
 
-func (bc *Blockchain) RedactRecord(recordID string, chameleonStore *chameleon.Store) error {
+func (bc *Blockchain) RedactRecord(recordID string, proof medical.RedactionProof, chameleonStore *chameleon.Store) error {
 	if chameleonStore == nil {
 		return fmt.Errorf("chameleon store is required")
+	}
+	if err := proof.Validate(); err != nil {
+		return fmt.Errorf("invalid redaction proof: %w", err)
 	}
 
 	for i := range bc.Blocks {
@@ -156,6 +163,7 @@ func (bc *Blockchain) RedactRecord(recordID string, chameleonStore *chameleon.St
 			record.Ciphertext = ""
 			record.Nonce = ""
 			record.WrappedKeys = nil
+			record.RedactionProof = &proof
 			return nil
 		})
 	}
@@ -221,7 +229,7 @@ func (bc *Blockchain) ValidateIntegrity(publicKey *chameleon.PublicKey) error {
 	return nil
 }
 
-func (bc *Blockchain) ValidateChain(store *auth.Keystore, publicKey *chameleon.PublicKey) error {
+func (bc *Blockchain) ValidateChain(store *auth.Keystore, publicKey *chameleon.PublicKey, proofVerifier RedactionProofVerifier) error {
 	if err := bc.ValidateIntegrity(publicKey); err != nil {
 		return err
 	}
@@ -260,6 +268,17 @@ func (bc *Blockchain) ValidateChain(store *auth.Keystore, publicKey *chameleon.P
 				if authorityWrappedKey.ActorRole != actors.RoleAuthority {
 					return fmt.Errorf("authority wrapped key role mismatch at block %d", i)
 				}
+			}
+		}
+		if curr.Record.IsRedacted() {
+			if curr.Record.RedactionProof == nil {
+				return fmt.Errorf("missing redaction proof at block %d", i)
+			}
+			if proofVerifier == nil {
+				return fmt.Errorf("proof verifier is required for redacted record at block %d", i)
+			}
+			if err := proofVerifier.VerifyRecordProof(curr.Record); err != nil {
+				return fmt.Errorf("invalid redaction proof at block %d: %w", i, err)
 			}
 		}
 	}

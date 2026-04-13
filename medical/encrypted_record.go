@@ -29,6 +29,7 @@ type EncryptedRecord struct {
 	DoctorID          string             `json:"doctor_id"`
 	RecordType        string             `json:"record_type"`
 	CreatedAt         int64              `json:"created_at"`
+	PatientCommitment string             `json:"patient_commitment"`
 	Ciphertext        string             `json:"ciphertext"`
 	Nonce             string             `json:"nonce"`
 	WrappedKeys       []WrappedKey       `json:"wrapped_keys"`
@@ -37,16 +38,18 @@ type EncryptedRecord struct {
 	RedactedAt        int64              `json:"redacted_at,omitempty"`
 	RedactionRequest  *RedactionRequest  `json:"redaction_request,omitempty"`
 	RedactionApproval *RedactionApproval `json:"redaction_approval,omitempty"`
+	RedactionProof    *RedactionProof    `json:"redaction_proof,omitempty"`
 }
 
 type encryptedRecordSignablePayload struct {
-	RecordID    string       `json:"record_id"`
-	DoctorID    string       `json:"doctor_id"`
-	RecordType  string       `json:"record_type"`
-	CreatedAt   int64        `json:"created_at"`
-	Ciphertext  string       `json:"ciphertext"`
-	Nonce       string       `json:"nonce"`
-	WrappedKeys []WrappedKey `json:"wrapped_keys"`
+	PatientCommitment string       `json:"patient_commitment"`
+	RecordID          string       `json:"record_id"`
+	DoctorID          string       `json:"doctor_id"`
+	RecordType        string       `json:"record_type"`
+	CreatedAt         int64        `json:"created_at"`
+	Ciphertext        string       `json:"ciphertext"`
+	Nonce             string       `json:"nonce"`
+	WrappedKeys       []WrappedKey `json:"wrapped_keys"`
 }
 
 func NewRecordPayload(patientID, title, content string) RecordPayload {
@@ -66,15 +69,16 @@ func NewGenesisEncryptedRecord() EncryptedRecord {
 	}
 }
 
-func NewEncryptedRecord(recordID, doctorID, recordType string, createdAt int64, ciphertext, nonce string, wrappedKeys []WrappedKey) EncryptedRecord {
+func NewEncryptedRecord(recordID, doctorID, recordType string, createdAt int64, patientCommitment, ciphertext, nonce string, wrappedKeys []WrappedKey) EncryptedRecord {
 	return EncryptedRecord{
-		RecordID:    recordID,
-		DoctorID:    doctorID,
-		RecordType:  recordType,
-		CreatedAt:   createdAt,
-		Ciphertext:  ciphertext,
-		Nonce:       nonce,
-		WrappedKeys: append([]WrappedKey(nil), wrappedKeys...),
+		RecordID:          recordID,
+		DoctorID:          doctorID,
+		RecordType:        recordType,
+		CreatedAt:         createdAt,
+		PatientCommitment: patientCommitment,
+		Ciphertext:        ciphertext,
+		Nonce:             nonce,
+		WrappedKeys:       append([]WrappedKey(nil), wrappedKeys...),
 	}
 }
 
@@ -129,14 +133,23 @@ func (r EncryptedRecord) ValidateStored() error {
 	if r.CreatedAt <= 0 {
 		return fmt.Errorf("created_at must be set")
 	}
+	if strings.TrimSpace(r.PatientCommitment) == "" {
+		return fmt.Errorf("patient_commitment is required")
+	}
 
 	if err := r.validateRedactionMetadata(); err != nil {
+		return err
+	}
+	if err := r.validateProofMetadata(); err != nil {
 		return err
 	}
 
 	if r.Redacted {
 		if r.PendingRedaction {
 			return fmt.Errorf("redacted record cannot still be pending redaction")
+		}
+		if r.RedactionRequest == nil || r.RedactionApproval == nil {
+			return fmt.Errorf("redacted record must retain request and approval metadata")
 		}
 		if r.RedactedAt <= 0 {
 			return fmt.Errorf("redacted_at must be set for redacted records")
@@ -150,11 +163,17 @@ func (r EncryptedRecord) ValidateStored() error {
 		if len(r.WrappedKeys) != 0 {
 			return fmt.Errorf("redacted record must not retain wrapped keys")
 		}
+		if r.RedactionProof == nil {
+			return fmt.Errorf("redacted record must retain a redaction proof")
+		}
 		return nil
 	}
 
 	if r.RedactedAt != 0 {
 		return fmt.Errorf("non-redacted record must not set redacted_at")
+	}
+	if r.RedactionProof != nil {
+		return fmt.Errorf("non-redacted record must not carry redaction proof metadata")
 	}
 	if strings.TrimSpace(r.Ciphertext) == "" {
 		return fmt.Errorf("ciphertext is required")
@@ -200,13 +219,14 @@ func (r EncryptedRecord) SignableBytes() ([]byte, error) {
 	})
 
 	payload := encryptedRecordSignablePayload{
-		RecordID:    r.RecordID,
-		DoctorID:    r.DoctorID,
-		RecordType:  r.RecordType,
-		CreatedAt:   r.CreatedAt,
-		Ciphertext:  r.Ciphertext,
-		Nonce:       r.Nonce,
-		WrappedKeys: sortedWrappedKeys,
+		PatientCommitment: r.PatientCommitment,
+		RecordID:          r.RecordID,
+		DoctorID:          r.DoctorID,
+		RecordType:        r.RecordType,
+		CreatedAt:         r.CreatedAt,
+		Ciphertext:        r.Ciphertext,
+		Nonce:             r.Nonce,
+		WrappedKeys:       sortedWrappedKeys,
 	}
 
 	encoded, err := json.Marshal(payload)
@@ -261,6 +281,20 @@ func (r EncryptedRecord) validateRedactionMetadata() error {
 	}
 	if r.RedactionRequest.PatientID != r.RedactionApproval.PatientID {
 		return fmt.Errorf("redaction patient mismatch between request and approval")
+	}
+
+	return nil
+}
+
+func (r EncryptedRecord) validateProofMetadata() error {
+	if r.RedactionProof == nil {
+		return nil
+	}
+	if err := r.RedactionProof.Validate(); err != nil {
+		return fmt.Errorf("invalid redaction proof: %w", err)
+	}
+	if r.RedactionProof.PatientCommitment != r.PatientCommitment {
+		return fmt.Errorf("redaction proof patient commitment mismatch")
 	}
 
 	return nil

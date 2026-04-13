@@ -1,13 +1,28 @@
 package core
 
 import (
+	"encoding/base64"
+	"fmt"
 	"testing"
 
 	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/auth"
 	"github.com/jeetraj/amnesia/chameleon"
 	"github.com/jeetraj/amnesia/medical"
+	"github.com/jeetraj/amnesia/zk"
 )
+
+type allowAllProofVerifier struct{}
+
+func (allowAllProofVerifier) VerifyRecordProof(record medical.EncryptedRecord) error {
+	return nil
+}
+
+type failProofVerifier struct{}
+
+func (failProofVerifier) VerifyRecordProof(record medical.EncryptedRecord) error {
+	return fmt.Errorf("proof rejected")
+}
 
 func TestValidateChainDetectsTampering(t *testing.T) {
 	chain, _, publicKey := newTestBlockchain(t)
@@ -15,13 +30,13 @@ func TestValidateChainDetectsTampering(t *testing.T) {
 	addSignedBlock(t, chain, store, publicKey, medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Patient A: record 1"))
 	addSignedBlock(t, chain, store, publicKey, medical.NewRecord("P002", "D002", "diagnosis", "Diagnosis", "Patient B: record 2"))
 
-	if err := chain.ValidateChain(store, publicKey); err != nil {
+	if err := chain.ValidateChain(store, publicKey, nil); err != nil {
 		t.Fatalf("expected valid chain, got error: %v", err)
 	}
 
 	chain.Blocks[1].Record.Ciphertext = "tampered-data"
 
-	if err := chain.ValidateChain(store, publicKey); err == nil {
+	if err := chain.ValidateChain(store, publicKey, nil); err == nil {
 		t.Fatalf("expected tampering to be detected")
 	}
 }
@@ -43,7 +58,7 @@ func TestAddBlockGeneratesSequentialRecordIDs(t *testing.T) {
 
 func TestAddBlockRejectsInvalidRecord(t *testing.T) {
 	chain, _, publicKey := newTestBlockchain(t)
-	record := medical.NewEncryptedRecord("R001", "D001", "visit_note", 1, "", "nonce", []medical.WrappedKey{
+	record := medical.NewEncryptedRecord("R001", "D001", "visit_note", 1, "", "", "nonce", []medical.WrappedKey{
 		{
 			ActorID:            "D001",
 			ActorRole:          actors.RoleDoctor,
@@ -96,7 +111,7 @@ func TestValidateChainRejectsInvalidDoctorSignature(t *testing.T) {
 
 	chain.Blocks[1].DoctorSignature = "not-a-valid-signature"
 
-	if err := chain.ValidateChain(store, publicKey); err == nil {
+	if err := chain.ValidateChain(store, publicKey, nil); err == nil {
 		t.Fatalf("expected invalid signature to be rejected")
 	}
 }
@@ -125,7 +140,7 @@ func TestAuthorizeRedactionAddsSignedMetadataWithoutChangingLaterLinkHashes(t *t
 	if chain.Blocks[2].LinkHash != nextLinkHash {
 		t.Fatalf("expected downstream link hash to remain unchanged")
 	}
-	if err := chain.ValidateChain(store, publicKey); err != nil {
+	if err := chain.ValidateChain(store, publicKey, nil); err != nil {
 		t.Fatalf("expected valid chain after redaction authorization, got: %v", err)
 	}
 }
@@ -144,7 +159,7 @@ func TestValidateChainRejectsTamperedRedactionRequest(t *testing.T) {
 
 	chain.Blocks[1].Record.RedactionRequest.Reason = "tampered"
 
-	if err := chain.ValidateChain(store, publicKey); err == nil {
+	if err := chain.ValidateChain(store, publicKey, nil); err == nil {
 		t.Fatalf("expected tampered redaction request to be rejected")
 	}
 }
@@ -164,7 +179,8 @@ func TestRedactRecordRemovesEncryptedPayloadWithoutChangingLaterLinkHashes(t *te
 	nextPrevLink := chain.Blocks[2].PrevLinkHash
 	nextLinkHash := chain.Blocks[2].LinkHash
 
-	if err := chain.RedactRecord(blockOne.Record.RecordID, chameleonStore); err != nil {
+	proof := newTestRedactionProof(t, blockOne.Record.RecordID, "P001", blockOne.Record.PatientCommitment)
+	if err := chain.RedactRecord(blockOne.Record.RecordID, proof, chameleonStore); err != nil {
 		t.Fatalf("redact record failed: %v", err)
 	}
 
@@ -190,7 +206,7 @@ func TestRedactRecordRemovesEncryptedPayloadWithoutChangingLaterLinkHashes(t *te
 	if chain.Blocks[2].LinkHash != nextLinkHash {
 		t.Fatalf("expected downstream link hash to remain unchanged")
 	}
-	if err := chain.ValidateChain(store, publicKey); err != nil {
+	if err := chain.ValidateChain(store, publicKey, allowAllProofVerifier{}); err != nil {
 		t.Fatalf("expected valid chain after redaction, got: %v", err)
 	}
 }
@@ -206,13 +222,14 @@ func TestValidateChainRejectsRedactedRecordWithCiphertext(t *testing.T) {
 	if err := chain.AuthorizeRedaction(block.Record.RecordID, request, approval, chameleonStore); err != nil {
 		t.Fatalf("authorize redaction failed: %v", err)
 	}
-	if err := chain.RedactRecord(block.Record.RecordID, chameleonStore); err != nil {
+	proof := newTestRedactionProof(t, block.Record.RecordID, "P001", block.Record.PatientCommitment)
+	if err := chain.RedactRecord(block.Record.RecordID, proof, chameleonStore); err != nil {
 		t.Fatalf("redact record failed: %v", err)
 	}
 
 	chain.Blocks[1].Record.Ciphertext = "should-not-be-here"
 
-	if err := chain.ValidateChain(store, publicKey); err == nil {
+	if err := chain.ValidateChain(store, publicKey, allowAllProofVerifier{}); err == nil {
 		t.Fatalf("expected redacted record with ciphertext to be rejected")
 	}
 }
@@ -274,7 +291,19 @@ func addSignedBlock(t *testing.T, chain *Blockchain, store *auth.Keystore, publi
 }
 
 func encryptRecordForTest(store *auth.Keystore, record medical.MedicalRecord) (medical.EncryptedRecord, error) {
-	return store.EncryptRecord(record, []actors.ActorInfo{
+	salt, err := zk.GeneratePatientCommitmentSalt()
+	if err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+	if err := store.SetRecordCommitmentSalt(record.RecordID, salt); err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+	patientCommitment, err := zk.ComputePatientCommitment(record.RecordID, record.PatientID, salt)
+	if err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+
+	return store.EncryptRecord(record, patientCommitment, []actors.ActorInfo{
 		{ID: "A001", Role: actors.RoleAuthority, Active: true},
 	})
 }
@@ -301,4 +330,25 @@ func signTestRedactionApproval(t *testing.T, store *auth.Keystore, recordID, pat
 	}
 	approval.Signature = signature
 	return approval
+}
+
+func newTestRedactionProof(t *testing.T, recordID, patientID, patientCommitment string) medical.RedactionProof {
+	t.Helper()
+
+	recordField, err := zk.EncodeIDFieldString(recordID)
+	if err != nil {
+		t.Fatalf("encode record ID field: %v", err)
+	}
+	patientField, err := zk.EncodeIDFieldString(patientID)
+	if err != nil {
+		t.Fatalf("encode patient ID field: %v", err)
+	}
+
+	return medical.RedactionProof{
+		Scheme:            medical.RedactionProofScheme,
+		PatientCommitment: patientCommitment,
+		RecordIDField:     recordField,
+		PatientIDField:    patientField,
+		Proof:             base64.StdEncoding.EncodeToString([]byte("proof")),
+	}
 }

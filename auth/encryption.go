@@ -29,12 +29,15 @@ func generateEncryptionKeypair() (*ecdh.PublicKey, *ecdh.PrivateKey, error) {
 	return privateKey.PublicKey(), privateKey, nil
 }
 
-func (k *Keystore) EncryptRecord(record medical.MedicalRecord, authorities []actors.ActorInfo) (medical.EncryptedRecord, error) {
+func (k *Keystore) EncryptRecord(record medical.MedicalRecord, patientCommitment string, authorities []actors.ActorInfo) (medical.EncryptedRecord, error) {
 	if err := record.ValidateFields(); err != nil {
 		return medical.EncryptedRecord{}, err
 	}
 	if record.RecordID == "" {
 		return medical.EncryptedRecord{}, fmt.Errorf("record ID is required before encryption")
+	}
+	if patientCommitment == "" {
+		return medical.EncryptedRecord{}, fmt.Errorf("patient commitment is required before encryption")
 	}
 
 	payload := medical.NewRecordPayload(record.PatientID, record.Title, record.Content)
@@ -80,7 +83,7 @@ func (k *Keystore) EncryptRecord(record medical.MedicalRecord, authorities []act
 		return wrappedKeys[i].ActorID < wrappedKeys[j].ActorID
 	})
 
-	return medical.NewEncryptedRecord(record.RecordID, record.DoctorID, record.RecordType, record.CreatedAt, ciphertext, nonce, wrappedKeys), nil
+	return medical.NewEncryptedRecord(record.RecordID, record.DoctorID, record.RecordType, record.CreatedAt, patientCommitment, ciphertext, nonce, wrappedKeys), nil
 }
 
 func (k *Keystore) DecryptRecordForActor(record medical.EncryptedRecord, actorID string) (medical.RecordPayload, error) {

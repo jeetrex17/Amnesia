@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"github.com/jeetraj/amnesia/actors"
 	"github.com/jeetraj/amnesia/medical"
@@ -21,8 +22,13 @@ type Entry struct {
 	Active               bool   `json:"active"`
 }
 
+type RecordSecret struct {
+	PatientCommitmentSalt string `json:"patient_commitment_salt"`
+}
+
 type Keystore struct {
-	Entries []Entry `json:"entries"`
+	Entries       []Entry                 `json:"entries"`
+	RecordSecrets map[string]RecordSecret `json:"record_secrets,omitempty"`
 }
 
 func NewDemoKeystore(registry *actors.Registry) (*Keystore, error) {
@@ -131,6 +137,25 @@ func (k *Keystore) Validate() error {
 		}
 	}
 
+	for recordID, secret := range k.RecordSecrets {
+		if strings.TrimSpace(recordID) == "" {
+			return fmt.Errorf("record secret record ID is required")
+		}
+		if _, err := medical.ParseSequentialRecordID(recordID); err != nil {
+			return fmt.Errorf("invalid record secret ID %s: %w", recordID, err)
+		}
+		if strings.TrimSpace(secret.PatientCommitmentSalt) == "" {
+			return fmt.Errorf("patient commitment salt is required for record ID: %s", recordID)
+		}
+		saltBytes, err := base64.StdEncoding.DecodeString(secret.PatientCommitmentSalt)
+		if err != nil {
+			return fmt.Errorf("decode patient commitment salt for %s: %w", recordID, err)
+		}
+		if len(saltBytes) != 32 {
+			return fmt.Errorf("unexpected patient commitment salt length for %s: %d", recordID, len(saltBytes))
+		}
+	}
+
 	return nil
 }
 
@@ -155,6 +180,8 @@ func (k *Keystore) ActivateLegacyDefaults() {
 }
 
 func (k *Keystore) PopulateMissingEncryptionKeys() error {
+	k.ensureRecordSecretsMap()
+
 	for i := range k.Entries {
 		if k.Entries[i].EncryptionPublicKey != "" && k.Entries[i].EncryptionPrivateKey != "" {
 			continue
@@ -169,6 +196,54 @@ func (k *Keystore) PopulateMissingEncryptionKeys() error {
 	}
 
 	return nil
+}
+
+func (k *Keystore) RecordCommitmentSalt(recordID string) ([]byte, error) {
+	if k == nil {
+		return nil, fmt.Errorf("keystore is nil")
+	}
+	secret, ok := k.RecordSecrets[recordID]
+	if !ok {
+		return nil, fmt.Errorf("record secret not found for record ID: %s", recordID)
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(secret.PatientCommitmentSalt)
+	if err != nil {
+		return nil, fmt.Errorf("decode patient commitment salt for %s: %w", recordID, err)
+	}
+
+	return decoded, nil
+}
+
+func (k *Keystore) SetRecordCommitmentSalt(recordID string, salt []byte) error {
+	if k == nil {
+		return fmt.Errorf("keystore is nil")
+	}
+	if _, err := medical.ParseSequentialRecordID(recordID); err != nil {
+		return err
+	}
+	if len(salt) != 32 {
+		return fmt.Errorf("unexpected patient commitment salt length: %d", len(salt))
+	}
+
+	k.ensureRecordSecretsMap()
+	k.RecordSecrets[recordID] = RecordSecret{
+		PatientCommitmentSalt: base64.StdEncoding.EncodeToString(salt),
+	}
+	return nil
+}
+
+func (k *Keystore) DeleteRecordSecret(recordID string) {
+	if k == nil || k.RecordSecrets == nil {
+		return
+	}
+	delete(k.RecordSecrets, recordID)
+}
+
+func (k *Keystore) ensureRecordSecretsMap() {
+	if k.RecordSecrets == nil {
+		k.RecordSecrets = make(map[string]RecordSecret)
+	}
 }
 
 func (k *Keystore) EntryForActor(actorID string) (Entry, error) {

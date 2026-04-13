@@ -12,6 +12,7 @@ import (
 	"github.com/jeetraj/amnesia/chameleon"
 	"github.com/jeetraj/amnesia/core"
 	"github.com/jeetraj/amnesia/medical"
+	"github.com/jeetraj/amnesia/zk"
 )
 
 func TestSaveAndLoadChainRoundTrip(t *testing.T) {
@@ -35,9 +36,7 @@ func TestSaveAndLoadChainRoundTrip(t *testing.T) {
 
 	record := medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")
 	record.RecordID = "R001"
-	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{
-		{ID: "A001", Role: actors.RoleAuthority, Active: true},
-	})
+	encryptedRecord, err := encryptRecordForTest(store, record)
 	if err != nil {
 		t.Fatalf("encrypt record failed: %v", err)
 	}
@@ -96,9 +95,7 @@ func TestLoadChainRejectsTamperedFile(t *testing.T) {
 
 	record := medical.NewRecord("P001", "D001", "visit_note", "Visit Note", "Original content")
 	record.RecordID = "R001"
-	encryptedRecord, err := store.EncryptRecord(record, []actors.ActorInfo{
-		{ID: "A001", Role: actors.RoleAuthority, Active: true},
-	})
+	encryptedRecord, err := encryptRecordForTest(store, record)
 	if err != nil {
 		t.Fatalf("encrypt record failed: %v", err)
 	}
@@ -151,4 +148,22 @@ func loadedEncryptedCiphertext(t *testing.T, data string) string {
 	}
 
 	return parsed.Blocks[1].Record.Ciphertext
+}
+
+func encryptRecordForTest(store *auth.Keystore, record medical.MedicalRecord) (medical.EncryptedRecord, error) {
+	salt, err := zk.GeneratePatientCommitmentSalt()
+	if err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+	if err := store.SetRecordCommitmentSalt(record.RecordID, salt); err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+	patientCommitment, err := zk.ComputePatientCommitment(record.RecordID, record.PatientID, salt)
+	if err != nil {
+		return medical.EncryptedRecord{}, err
+	}
+
+	return store.EncryptRecord(record, patientCommitment, []actors.ActorInfo{
+		{ID: "A001", Role: actors.RoleAuthority, Active: true},
+	})
 }

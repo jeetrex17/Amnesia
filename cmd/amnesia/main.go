@@ -15,12 +15,14 @@ import (
 	"github.com/jeetraj/amnesia/core"
 	"github.com/jeetraj/amnesia/medical"
 	"github.com/jeetraj/amnesia/storage"
+	"github.com/jeetraj/amnesia/zk"
 )
 
 const chainPath = "chain.json"
 const actorsPath = "actors.json"
 const keystorePath = "keystore.json"
 const chameleonPath = "chameleon.json"
+const zkArtifactsPath = zk.ArtifactsDir
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -37,6 +39,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "init":
 		return runInit(stdout)
+	case "setup-zk":
+		return runSetupZK(stdout)
 	case "add-actor":
 		return runAddActor(args[1:], stdout, stderr)
 	case "list-actors":
@@ -53,6 +57,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runAuthorizeRedaction(args[1:], stdout, stderr)
 	case "redact-record":
 		return runRedactRecord(args[1:], stdout, stderr)
+	case "verify-proof":
+		return runVerifyProof(args[1:], stdout, stderr)
 	case "verify":
 		return runVerify(stdout)
 	case "help", "-h", "--help":
@@ -97,6 +103,15 @@ func runInit(stdout io.Writer) error {
 	}
 
 	_, err = fmt.Fprintf(stdout, "initialized blockchain at %s, actors at %s, keystore at %s, and chameleon keys at %s\n", chainPath, actorsPath, keystorePath, chameleonPath)
+	return err
+}
+
+func runSetupZK(stdout io.Writer) error {
+	if err := zk.Setup(zkArtifactsPath); err != nil {
+		return err
+	}
+
+	_, err := fmt.Fprintf(stdout, "initialized zk artifacts at %s\n", zkArtifactsPath)
 	return err
 }
 
@@ -217,6 +232,10 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	proofVerifier, err := loadOptionalProofVerifier()
+	if err != nil {
+		return err
+	}
 
 	patient, ok := registry.ActorByID(patientID)
 	if !ok || patient.Role != actors.RolePatient {
@@ -241,7 +260,19 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	}
 	record.RecordID = recordID
 
-	encryptedRecord, err := store.EncryptRecord(record, activeAuthorities(registry))
+	patientCommitmentSalt, err := zk.GeneratePatientCommitmentSalt()
+	if err != nil {
+		return err
+	}
+	patientCommitment, err := zk.ComputePatientCommitment(record.RecordID, record.PatientID, patientCommitmentSalt)
+	if err != nil {
+		return err
+	}
+	if err := store.SetRecordCommitmentSalt(record.RecordID, patientCommitmentSalt); err != nil {
+		return err
+	}
+
+	encryptedRecord, err := store.EncryptRecord(record, patientCommitment, activeAuthorities(registry))
 	if err != nil {
 		return err
 	}
@@ -254,14 +285,14 @@ func runAddRecord(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
+	if err := chain.ValidateChain(store, chameleonPublicKey, proofVerifier); err != nil {
 		return fmt.Errorf("post-add validation failed: %w", err)
 	}
 
-	if err := storage.SaveChain(chainPath, chain); err != nil {
+	if err := storage.SaveKeystore(keystorePath, store); err != nil {
 		return err
 	}
-	if err := storage.SaveKeystore(keystorePath, store); err != nil {
+	if err := storage.SaveChain(chainPath, chain); err != nil {
 		return err
 	}
 
@@ -503,6 +534,10 @@ func runAuthorizeRedaction(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	proofVerifier, err := loadOptionalProofVerifier()
+	if err != nil {
+		return err
+	}
 
 	patient, ok := registry.ActorByID(patientID)
 	if !ok || patient.Role != actors.RolePatient {
@@ -575,7 +610,7 @@ func runAuthorizeRedaction(args []string, stdout, stderr io.Writer) error {
 	if err := chain.AuthorizeRedaction(recordID, request, approval, chameleonStore); err != nil {
 		return err
 	}
-	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
+	if err := chain.ValidateChain(store, chameleonPublicKey, proofVerifier); err != nil {
 		return fmt.Errorf("post-authorization validation failed: %w", err)
 	}
 	if err := storage.SaveChain(chainPath, chain); err != nil {
@@ -625,6 +660,10 @@ func runRedactRecord(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	proofSystem, err := loadRequiredProofProver()
+	if err != nil {
+		return err
+	}
 
 	record, err := chain.RecordByID(recordID)
 	if err != nil {
@@ -639,6 +678,9 @@ func runRedactRecord(args []string, stdout, stderr io.Writer) error {
 	if !record.PendingRedaction || record.RedactionRequest == nil || record.RedactionApproval == nil {
 		return fmt.Errorf("record is not authorized for redaction: %s", recordID)
 	}
+	if record.RedactionProof != nil {
+		return fmt.Errorf("record already has redaction proof metadata: %s", recordID)
+	}
 
 	patient, ok := registry.ActorByID(record.RedactionRequest.PatientID)
 	if !ok || patient.Role != actors.RolePatient {
@@ -649,13 +691,34 @@ func runRedactRecord(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("redaction authority no longer exists: %s", record.RedactionApproval.AuthorityID)
 	}
 
-	if err := chain.RedactRecord(recordID, chameleonStore); err != nil {
+	payload, err := store.DecryptRecordForActor(record, record.RedactionApproval.AuthorityID)
+	if err != nil {
 		return err
 	}
-	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
+	if payload.PatientID != record.RedactionRequest.PatientID {
+		return fmt.Errorf("decrypted patient ID does not match redaction request patient: expected %s got %s", payload.PatientID, record.RedactionRequest.PatientID)
+	}
+
+	patientCommitmentSalt, err := store.RecordCommitmentSalt(recordID)
+	if err != nil {
+		return err
+	}
+	proof, err := proofSystem.GenerateRedactionProof(record.RecordID, record.RedactionRequest.PatientID, record.PatientCommitment, patientCommitmentSalt)
+	if err != nil {
+		return err
+	}
+
+	if err := chain.RedactRecord(recordID, proof, chameleonStore); err != nil {
+		return err
+	}
+	if err := chain.ValidateChain(store, chameleonPublicKey, proofSystem); err != nil {
 		return fmt.Errorf("post-redaction validation failed: %w", err)
 	}
 	if err := storage.SaveChain(chainPath, chain); err != nil {
+		return err
+	}
+	store.DeleteRecordSecret(recordID)
+	if err := storage.SaveKeystore(keystorePath, store); err != nil {
 		return err
 	}
 
@@ -680,12 +743,72 @@ func runVerify(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	proofVerifier, err := loadOptionalProofVerifier()
+	if err != nil {
+		return err
+	}
 
-	if err := chain.ValidateChain(store, chameleonPublicKey); err != nil {
+	if err := chain.ValidateChain(store, chameleonPublicKey, proofVerifier); err != nil {
 		return fmt.Errorf("chain validation failed: %w", err)
 	}
 
 	_, err = fmt.Fprintln(stdout, "chain is valid")
+	return err
+}
+
+func runVerifyProof(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("verify-proof", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	recordIDLong := fs.String("record-id", "", "record identifier")
+	recordIDShort := fs.String("i", "", "record identifier")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	recordID, err := resolveFlagValue("record-id", *recordIDLong, "i", *recordIDShort)
+	if err != nil {
+		return err
+	}
+	if recordID == "" {
+		return fmt.Errorf("record-id is required")
+	}
+
+	chain, err := loadExistingChain()
+	if err != nil {
+		return err
+	}
+	store, err := loadKeystore()
+	if err != nil {
+		return err
+	}
+	proofVerifier, err := loadRequiredProofVerifier()
+	if err != nil {
+		return err
+	}
+
+	record, err := chain.RecordByID(recordID)
+	if err != nil {
+		return err
+	}
+	if !record.IsRedacted() {
+		return fmt.Errorf("record is not redacted: %s", recordID)
+	}
+	if record.RedactionRequest == nil || record.RedactionApproval == nil {
+		return fmt.Errorf("record is missing redaction authorization metadata: %s", recordID)
+	}
+	if err := store.VerifyRedactionRequestSignature(*record.RedactionRequest); err != nil {
+		return fmt.Errorf("invalid redaction request signature: %w", err)
+	}
+	if err := store.VerifyRedactionApprovalSignature(*record.RedactionApproval); err != nil {
+		return fmt.Errorf("invalid redaction approval signature: %w", err)
+	}
+	if err := proofVerifier.VerifyRecordProof(record); err != nil {
+		return fmt.Errorf("proof verification failed: %w", err)
+	}
+
+	_, err = fmt.Fprintf(stdout, "proof is valid for record %s\n", recordID)
 	return err
 }
 
@@ -743,6 +866,42 @@ func loadChameleonStore() (*chameleon.Store, error) {
 	}
 
 	return store, nil
+}
+
+func loadOptionalProofVerifier() (*zk.System, error) {
+	verifier, err := zk.LoadVerifier(zkArtifactsPath)
+	if err != nil {
+		if zk.IsArtifactsMissing(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return verifier, nil
+}
+
+func loadRequiredProofVerifier() (*zk.System, error) {
+	verifier, err := zk.LoadVerifier(zkArtifactsPath)
+	if err != nil {
+		if zk.IsArtifactsMissing(err) {
+			return nil, fmt.Errorf("%s not found; run `amnesia setup-zk` first", zkArtifactsPath)
+		}
+		return nil, err
+	}
+
+	return verifier, nil
+}
+
+func loadRequiredProofProver() (*zk.System, error) {
+	prover, err := zk.LoadProver(zkArtifactsPath)
+	if err != nil {
+		if zk.IsArtifactsMissing(err) {
+			return nil, fmt.Errorf("%s not found; run `amnesia setup-zk` first", zkArtifactsPath)
+		}
+		return nil, err
+	}
+
+	return prover, nil
 }
 
 func resolveFlagValue(longName, longValue, shortName, shortValue string) (string, error) {
@@ -804,6 +963,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  init")
 	fmt.Fprintln(w, "      Create a fresh blockchain and seed demo actors, keys, and chameleon-link material.")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  setup-zk")
+	fmt.Fprintln(w, "      Compile the patient-binding circuit and generate Groth16 artifacts in zk-artifacts/.")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  add-actor [--role|-r] <patient|doctor|authority> [--name|-n] <name>")
 	fmt.Fprintln(w, "      Add a new active actor and generate a matching keypair.")
 	fmt.Fprintln(w)
@@ -828,10 +990,13 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "      Attach signed patient request and authority approval metadata to a record.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  redact-record [--record-id|-i] <record-id>")
-	fmt.Fprintln(w, "      Execute a full-record redaction for an already-authorized record.")
+	fmt.Fprintln(w, "      Generate the redaction proof and execute a full-record redaction for an already-authorized record.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  verify-proof [--record-id|-i] <record-id>")
+	fmt.Fprintln(w, "      Verify the stored Groth16 proof for one redacted record.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  verify")
-	fmt.Fprintln(w, "      Validate encrypted records, chameleon links, and doctor/patient/authority signatures.")
+	fmt.Fprintln(w, "      Validate encrypted records, chameleon links, signatures, and stored redaction proofs.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Supported medical record types:")
 	fmt.Fprintln(w, "  diagnosis           A diagnosis or confirmed condition")
@@ -859,5 +1024,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `  amnesia view-record -i R001 -a D001`)
 	fmt.Fprintln(w, `  amnesia authorize-redaction -i R001 -p P007 -a A001 -r "patient requests deletion"`)
 	fmt.Fprintln(w, `  amnesia redact-record -i R001`)
+	fmt.Fprintln(w, `  amnesia verify-proof -i R001`)
 	fmt.Fprintln(w, `  amnesia add-actor -r doctor -n "Dr. Kapoor"`)
 }
